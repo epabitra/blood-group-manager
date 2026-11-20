@@ -646,8 +646,8 @@ function menuAddUser() {
     return r.getResponseText().trim();
   };
   try {
-    const username = normUsername_(ask('Add user (1/4)', 'Username (letters, numbers, . _ -):'));
-    if (!/^[a-z0-9._-]{3,40}$/.test(username)) return ui.alert('Username must be 3-40 characters: letters, numbers, . _ -');
+    const username = normUsername_(ask('Add user (1/4)', 'Username or email (letters, numbers, . _ - @):'));
+    if (!/^[a-z0-9._@+-]{3,60}$/.test(username)) return ui.alert('Username must be 3-60 characters: letters, numbers, . _ - @ +');
 
     const found = findUser_(username);
     if (found && ui.alert('User "' + username + '" exists. Reset their password?', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;

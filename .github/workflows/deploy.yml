@@ -27,7 +27,8 @@ jobs:
       - name: Build
         run: npm run build
         env:
-          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          # Works whether VITE_API_URL was saved as a repository secret or a variable.
+          VITE_API_URL: ${{ secrets.VITE_API_URL || vars.VITE_API_URL }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

@@ -45,7 +45,7 @@ export function clearSession() {
 
 async function call(action, payload = {}) {
   if (!API_URL) {
-    throw new ApiError('App is not configured: VITE_API_URL is missing. See docs/02-local-development.md.', 'CONFIG');
+    throw new ApiError('App is not configured: VITE_API_URL is missing. Set it in GitHub (Settings → Secrets and variables → Actions) or in .env.local.', 'CONFIG');
   }
   const session = getSession();
   let res;
