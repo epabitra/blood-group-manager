@@ -1,0 +1,84 @@
+# ---------------------------------------------------------------
+# Secrets & environment files (API URL, keys, tokens)
+# ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.local
+
+# Google Apps Script CLI (clasp) — .clasprc.json holds Google login tokens
+.clasprc.json
+.clasp.json
+creds.json
+credentials.json
+client_secret*.json
+service-account*.json
+token.json
+
+# Private keys & certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+id_rsa*
+id_ed25519*
+
+# ---------------------------------------------------------------
+# Donor data — personal information must NEVER be committed
+# (CSV exports from the app, sheet downloads, backups)
+# ---------------------------------------------------------------
+*.csv
+*.xlsx
+*.xls
+*.xlsm
+*.ods
+*.tsv
+donors*.json
+backup/
+backups/
+*.backup
+*.bak
+*.sqlite
+*.db
+
+# ---------------------------------------------------------------
+# Build output & dependencies
+# ---------------------------------------------------------------
+node_modules/
+dist/
+dist-ssr/
+build/
+.vite/
+coverage/
+*.tsbuildinfo
+
+# ---------------------------------------------------------------
+# Logs & debug files
+# ---------------------------------------------------------------
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------------------------------------------------------------
+# Editor / OS files
+# ---------------------------------------------------------------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------
+# Private setup guides (kept only on the maintainer's computer)
+# ---------------------------------------------------------------
+docs/
+
+# Claude Code local settings
+.claude/settings.local.json
