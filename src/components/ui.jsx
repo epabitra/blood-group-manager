@@ -98,7 +98,7 @@ export function ContactButtons({ phone, message, onRecord }) {
   );
 }
 
-export function DonorCard({ donor, onOpen, message, highlight, onRecord }) {
+export function DonorCard({ donor, onOpen, message, highlight, onRecord, hideContact }) {
   const place = [donor.area, donor.city].filter(Boolean).join(', ');
   return (
     <div
@@ -125,7 +125,7 @@ export function DonorCard({ donor, onOpen, message, highlight, onRecord }) {
         </div>
       </div>
       <ContactButtons
-        phone={donor.phone}
+        phone={hideContact || donor.masked ? null : donor.phone}
         message={message}
         onRecord={onRecord ? () => onRecord(donor.id) : undefined}
       />

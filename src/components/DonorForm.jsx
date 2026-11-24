@@ -1,8 +1,11 @@
-import { useState } from 'react';
+import { useDeferredValue, useMemo, useState } from 'react';
 import { api } from '../api';
 import { AVAILABILITY, BLOOD_GROUPS, EMPTY_DONOR, GENDERS } from '../constants';
-import { digits, todayStr } from '../utils';
-import { Modal, Spinner } from './ui';
+import { useDonorSearch } from '../useDonorSearch';
+import { digits, timeAgo, todayStr } from '../utils';
+import { BloodBadge, Modal, Spinner } from './ui';
+
+const MAX_SUGGESTIONS = 5;
 
 function initialValues(donor) {
   const v = {};
@@ -13,61 +16,94 @@ function initialValues(donor) {
   return v;
 }
 
-export default function DonorForm({ donor, onClose, onSaved }) {
+const normName = (s) => String(s || '').toLowerCase().replace(/[^a-z଀-୿]/g, '');
+const last10 = (s) => digits(s).slice(-10);
+
+/**
+ * Add / edit a donor. For a new donor:
+ *  - existing donors matching the typed name or phone are suggested, so nobody is added twice;
+ *  - "Donated today" records the donation in the same save.
+ */
+export default function DonorForm({
+  donor,
+  donors,
+  canView,
+  canRecord,
+  settings,
+  recordDonation,
+  onClose,
+  onSaved,
+  onPickExisting,
+}) {
+  const isEdit = Boolean(donor.id);
   const [v, setV] = useState(() => initialValues(donor));
+  const [donated, setDonated] = useState(Boolean(recordDonation) && !isEdit && canRecord);
+  const [donation, setDonation] = useState({ date: todayStr(), place: '', notes: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [duplicate, setDuplicate] = useState('');
-  const isEdit = Boolean(donor.id);
 
   const set = (k) => (e) => setV((old) => ({ ...old, [k]: e.target.value }));
+  const setDon = (k) => (e) => setDonation((old) => ({ ...old, [k]: e.target.value }));
 
-  const save = async (force = false) => {
+  const name = useDeferredValue(v.name);
+  const phone = useDeferredValue(v.phone);
+
+  // Users who can't view the list get suggestions from the server (max 10, phones hidden).
+  const remoteQuery = !canView && !isEdit ? (digits(phone).length >= 4 ? phone : name) : '';
+  const remote = useDonorSearch(remoteQuery, { canView: false, donors: [], settings });
+
+  const suggestions = useMemo(() => {
+    if (isEdit) return { exact: null, list: [] };
+    if (!canView) return { exact: null, list: remote.results.slice(0, MAX_SUGGESTIONS) };
+    const nm = normName(name);
+    const pd = digits(phone);
+    if (nm.length < 3 && pd.length < 4) return { exact: null, list: [] };
+    const exact = pd.length >= 10 && nm ? donors.find((d) => last10(d.phone) === last10(pd) && normName(d.name) === nm) : null;
+    const list = donors
+      .filter(
+        (d) =>
+          d !== exact &&
+          ((pd.length >= 4 && (digits(d.phone).includes(pd) || digits(d.altPhone).includes(pd))) ||
+            (nm.length >= 3 && normName(d.name).includes(nm))),
+      )
+      .slice(0, MAX_SUGGESTIONS);
+    return { exact, list };
+  }, [donors, name, phone, isEdit, canView, remote.results]);
+
+  const submit = async (e) => {
+    e.preventDefault();
     setError('');
-    setDuplicate('');
     if (!v.name.trim()) return setError('Name is required.');
     if (digits(v.phone).length < 7) return setError('Enter a valid phone number.');
     if (!v.bloodGroup) return setError('Select a blood group.');
+    if (donated && !donation.date) return setError('Enter the donation date.');
 
     setBusy(true);
     try {
-      onSaved(await api.saveDonor(v, force));
-    } catch (e) {
-      if (e.code === 'DUPLICATE') setDuplicate(e.message);
-      else setError(e.message);
-    } finally {
+      const res = await api.saveDonor(v, donated ? donation : null);
+      onSaved(res.donor, { merged: res.merged, donated });
+    } catch (err) {
+      setError(err.message);
       setBusy(false);
     }
   };
 
-  const submit = (e) => {
-    e.preventDefault();
-    save(false);
-  };
-
   const today = todayStr();
+  const { exact, list } = suggestions;
 
   return (
     <Modal
-      title={isEdit ? `Edit ${donor.name}` : 'Add donor'}
+      title={isEdit ? `Edit ${donor.name}` : donated ? 'New donor + donation' : 'Add donor'}
       onClose={onClose}
       wide
       footer={
         <>
           {error && <p className="error grow">{error}</p>}
-          {duplicate && (
-            <div className="warning grow">
-              {duplicate}
-              <button className="btn small primary" onClick={() => save(true)} disabled={busy}>
-                Yes, save anyway
-              </button>
-            </div>
-          )}
           <button className="btn ghost" onClick={onClose} disabled={busy}>
             Cancel
           </button>
           <button className="btn primary grow" type="submit" form="donor-form" disabled={busy}>
-            {busy ? <Spinner small /> : isEdit ? 'Save changes' : 'Add donor'}
+            {busy ? <Spinner small /> : isEdit ? 'Save changes' : donated ? '✓ Save donor & donation' : 'Add donor'}
           </button>
         </>
       }
@@ -76,8 +112,41 @@ export default function DonorForm({ donor, onClose, onSaved }) {
         <fieldset>
           <legend>Basic details</legend>
           <Field label="Full name *">
-            <input value={v.name} onChange={set('name')} required autoFocus maxLength={200} />
+            <input value={v.name} onChange={set('name')} required autoFocus={!v.name} maxLength={200} autoComplete="off" />
           </Field>
+          <Field label="Phone *">
+            <input type="tel" value={v.phone} onChange={set('phone')} required inputMode="tel" maxLength={20} autoComplete="off" />
+          </Field>
+
+          {(exact || list.length > 0) && (
+            <div className="suggest wide">
+              {exact ? (
+                <p className="suggest-title exact">
+                  ⚠ This donor is already saved. Use the existing record instead of adding again:
+                </p>
+              ) : (
+                <p className="suggest-title">Already saved? Tap the person to use their record:</p>
+              )}
+              {[exact, ...list].filter(Boolean).map((d) => (
+                <button
+                  type="button"
+                  key={d.id}
+                  className={`pick-item${d === exact ? ' exact' : ''}`}
+                  onClick={() => onPickExisting(d, donated)}
+                >
+                  <BloodBadge group={d.bloodGroup} />
+                  <span className="pick-main">
+                    <span className="donor-name">{d.name}</span>
+                    <span className="muted small">
+                      {d.phone} · Last: {timeAgo(d.lastDonated)}
+                    </span>
+                  </span>
+                  <span className="chev">›</span>
+                </button>
+              ))}
+            </div>
+          )}
+
           <Field label="Blood group *">
             <select value={v.bloodGroup} onChange={set('bloodGroup')} required>
               <option value="">Select…</option>
@@ -86,12 +155,36 @@ export default function DonorForm({ donor, onClose, onSaved }) {
               ))}
             </select>
           </Field>
-          <Field label="Phone *">
-            <input type="tel" value={v.phone} onChange={set('phone')} required inputMode="tel" maxLength={20} />
-          </Field>
           <Field label="Alternate phone">
             <input type="tel" value={v.altPhone} onChange={set('altPhone')} inputMode="tel" maxLength={20} />
           </Field>
+        </fieldset>
+
+        {!isEdit && canRecord && (
+          <fieldset className="donated-box">
+            <label className="switch wide">
+              <input type="checkbox" checked={donated} onChange={(e) => setDonated(e.target.checked)} />
+              <span>
+                <strong>Donated today / at this camp</strong>
+                <br />
+                <small className="muted">Records the donation together with the new donor.</small>
+              </span>
+            </label>
+            {donated && (
+              <>
+                <Field label="Donation date *">
+                  <input type="date" value={donation.date} onChange={setDon('date')} max={today} required />
+                </Field>
+                <Field label="Camp / hospital">
+                  <input value={donation.place} onChange={setDon('place')} placeholder="e.g. Balaji Temple camp" maxLength={200} />
+                </Field>
+              </>
+            )}
+          </fieldset>
+        )}
+
+        <fieldset>
+          <legend>More details (optional)</legend>
           <Field label="Gender" hint="Decides the waiting period between donations (see Settings).">
             <select value={v.gender} onChange={set('gender')}>
               <option value="">Not specified</option>
@@ -128,13 +221,17 @@ export default function DonorForm({ donor, onClose, onSaved }) {
         </fieldset>
 
         <fieldset>
-          <legend>Donation</legend>
-          <Field label="Last donated on">
-            <input type="date" value={v.lastDonated} onChange={set('lastDonated')} max={today} />
-          </Field>
-          <Field label="Total donations so far">
-            <input type="number" value={v.totalDonations} onChange={set('totalDonations')} min="0" step="1" />
-          </Field>
+          <legend>Donation record</legend>
+          {!donated && (
+            <>
+              <Field label="Last donated on" hint="Only if they donated before and it isn't recorded.">
+                <input type="date" value={v.lastDonated} onChange={set('lastDonated')} max={today} />
+              </Field>
+              <Field label="Total donations so far">
+                <input type="number" value={v.totalDonations} onChange={set('totalDonations')} min="0" step="1" />
+              </Field>
+            </>
+          )}
           <Field label="Availability">
             <select value={v.availability} onChange={set('availability')}>
               {AVAILABILITY.map((a) => (

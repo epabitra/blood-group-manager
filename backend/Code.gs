@@ -23,7 +23,34 @@ const SHEETS = { DONORS: 'Donors', DONATIONS: 'Donations', USERS: 'Users' };
 const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'Bombay (Oh)', 'Unknown'];
 const GENDERS = ['Male', 'Female', 'Other'];
 const AVAILABILITY = ['Available', 'Unavailable', 'Do Not Contact'];
-const ROLES = ['admin', 'volunteer'];
+const ROLES = ['admin', 'manager', 'volunteer'];
+
+// What each role may do. Admin always has everything; the admin sets manager / volunteer
+// permissions on the app's Permissions page (stored in Script Properties).
+const PERMISSIONS = [
+  'viewDonors',       // donor list, Find Blood, full details and phone numbers
+  'addDonors',
+  'editDonors',
+  'recordDonations',
+  'deleteDonors',
+  'exportDonors',
+  'importDonors',
+  'manageSettings',   // eligibility rules
+  'manageVolunteers', // add / activate / deactivate / reset volunteer accounts
+];
+const DEFAULT_PERMISSIONS = {
+  manager: {
+    viewDonors: true, addDonors: true, editDonors: true, recordDonations: true, deleteDonors: false,
+    exportDonors: true, importDonors: false, manageSettings: false, manageVolunteers: true,
+  },
+  volunteer: {
+    viewDonors: false, addDonors: true, editDonors: false, recordDonations: true, deleteDonors: false,
+    exportDonors: false, importDonors: false, manageSettings: false, manageVolunteers: false,
+  },
+};
+// These are impossible without seeing the donors, so they require viewDonors.
+const NEEDS_VIEW = ['editDonors', 'deleteDonors', 'exportDonors', 'importDonors'];
+const SEARCH_LIMIT = 10;
 
 // [key used by the app, header label in the sheet]
 const DONOR_COLUMNS = [
@@ -120,13 +147,35 @@ const ACTIONS = {
   bootstrap: bootstrap_,
   saveSettings: saveSettings_,
   listDonors: listDonors_,
+  searchDonors: searchDonors_,
   saveDonor: saveDonor_,
+  importDonors: importDonors_,
   deleteDonor: deleteDonor_,
   recordDonation: recordDonation_,
   listDonations: listDonations_,
   changePassword: changePassword_,
+  listUsers: listUsers_,
+  saveUser: saveUser_,
+  resetUserPassword: resetUserPassword_,
+  savePermissions: savePermissions_,
 };
-const ADMIN_ONLY = { deleteDonor: true, saveSettings: true };
+
+// Permission(s) needed for each action (any one of them is enough). Checked on the server,
+// so hiding a button in the app is never the only protection.
+const ACTION_PERMISSIONS = {
+  listDonors: ['viewDonors'],
+  listDonations: ['viewDonors'],
+  searchDonors: ['viewDonors', 'addDonors', 'recordDonations'],
+  saveDonor: ['addDonors', 'editDonors'], // refined inside saveDonor_
+  importDonors: ['importDonors'],
+  deleteDonor: ['deleteDonors'],
+  recordDonation: ['recordDonations'],
+  saveSettings: ['manageSettings'],
+  listUsers: ['manageVolunteers'],
+  saveUser: ['manageVolunteers'],
+  resetUserPassword: ['manageVolunteers'],
+};
+const ADMIN_ONLY = { savePermissions: true };
 
 function route_(req) {
   const action = String(req.action || '');
@@ -136,10 +185,59 @@ function route_(req) {
   const handler = ACTIONS[action];
   if (!handler) throw apiError_('Unknown action.', 'BAD_REQUEST');
   const session = requireSession_(req.token);
+  session.perms = permissionsFor_(session.role);
   if (ADMIN_ONLY[action] && session.role !== 'admin') {
-    throw apiError_('Only an admin can do this.', 'FORBIDDEN');
+    throw apiError_('Only the admin can do this.', 'FORBIDDEN');
   }
+  requirePermission_(session, ACTION_PERMISSIONS[action]);
   return handler(payload, session, req.token);
+}
+
+function requirePermission_(session, needed) {
+  if (needed && !needed.some(p => session.perms[p])) {
+    throw apiError_('You do not have permission to do this. Please ask the admin.', 'FORBIDDEN');
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Roles & permissions                                                 */
+/* ------------------------------------------------------------------ */
+
+/** Saved manager / volunteer permissions, with defaults for anything not saved yet. */
+function getRolePermissions_() {
+  const raw = PropertiesService.getScriptProperties().getProperty('permissions');
+  const saved = raw ? JSON.parse(raw) : {};
+  const out = {};
+  Object.keys(DEFAULT_PERMISSIONS).forEach(role => {
+    out[role] = {};
+    PERMISSIONS.forEach(p => {
+      const v = saved[role] && saved[role][p];
+      out[role][p] = typeof v === 'boolean' ? v : DEFAULT_PERMISSIONS[role][p];
+    });
+    if (!out[role].viewDonors) NEEDS_VIEW.forEach(p => { out[role][p] = false; });
+  });
+  return out;
+}
+
+function permissionsFor_(role) {
+  if (role === 'admin') {
+    const all = {};
+    PERMISSIONS.forEach(p => { all[p] = true; });
+    return all;
+  }
+  return getRolePermissions_()[role] || getRolePermissions_().volunteer;
+}
+
+function savePermissions_(p) {
+  const input = p.permissions || {};
+  const out = {};
+  Object.keys(DEFAULT_PERMISSIONS).forEach(role => {
+    out[role] = {};
+    PERMISSIONS.forEach(perm => { out[role][perm] = Boolean(input[role] && input[role][perm]); });
+    if (!out[role].viewDonors) NEEDS_VIEW.forEach(perm => { out[role][perm] = false; });
+  });
+  PropertiesService.getScriptProperties().setProperty('permissions', JSON.stringify(out));
+  return out;
 }
 
 function apiError_(message, code) {
@@ -179,7 +277,8 @@ function login_(p) {
   // Send the data with the login response so the app needs no second request.
   const result = createSession_(found.user);
   try {
-    result.bootstrap = bootstrap_({});
+    const role = result.user.role;
+    result.bootstrap = bootstrap_({}, { role: role, perms: permissionsFor_(role) });
   } catch (e) {
     result.bootstrap = null;
   }
@@ -193,9 +292,17 @@ function logout_(p, session, token) {
   return true;
 }
 
-/** Everything the app needs on start-up, in one request. */
-function bootstrap_(p) {
-  return { settings: getSettings_(), donors: listDonors_(p) };
+/**
+ * Everything the app needs on start-up, in one request. The donor list is only sent to roles
+ * allowed to see it — a volunteer's phone never receives it.
+ */
+function bootstrap_(p, session) {
+  return {
+    settings: getSettings_(),
+    permissions: session.perms,
+    rolePermissions: session.role === 'admin' ? getRolePermissions_() : null,
+    donors: session.perms.viewDonors ? listDonors_(p) : null,
+  };
 }
 
 function getSettings_() {
@@ -251,7 +358,7 @@ function createSession_(user) {
   const session = {
     username: user.username,
     name: user.displayName || user.username,
-    role: user.role === 'admin' ? 'admin' : 'volunteer',
+    role: ROLES.indexOf(user.role) !== -1 ? user.role : 'volunteer',
     created: Date.now(),
     expires: expires,
   };
@@ -375,6 +482,109 @@ function findUser_(username) {
 }
 
 /* ------------------------------------------------------------------ */
+/* User management (Users page in the app)                             */
+/* ------------------------------------------------------------------ */
+
+/** Admin: any user. Others with manageVolunteers: volunteers only. */
+function canManageRole_(session, role) {
+  return session.role === 'admin' || (session.perms.manageVolunteers && role === 'volunteer');
+}
+
+function listUsers_(p, session) {
+  const sheet = getSheet_(SHEETS.USERS);
+  const idx = headerIndex_(sheet, USER_COLUMNS).idx;
+  const last = sheet.getLastRow();
+  if (last < 2) return [];
+  return sheet.getRange(2, 1, last - 1, sheet.getLastColumn()).getValues()
+    .filter(r => r[idx.username] !== '')
+    .map(r => ({
+      username: normUsername_(r[idx.username]),
+      displayName: String(r[idx.displayName] || ''),
+      role: ROLES.indexOf(r[idx.role]) !== -1 ? r[idx.role] : 'volunteer',
+      active: isActive_(r[idx.active]),
+      lastLogin: r[idx.lastLogin] instanceof Date ? r[idx.lastLogin].toISOString() : String(r[idx.lastLogin] || ''),
+      createdAt: r[idx.createdAt] instanceof Date ? r[idx.createdAt].toISOString() : String(r[idx.createdAt] || ''),
+    }))
+    .filter(u => canManageRole_(session, u.role) || u.username === session.username);
+}
+
+/** Creates a user (with password) or updates name / role / active. */
+function saveUser_(p, session) {
+  const username = normUsername_(p.username);
+  const displayName = cleanText_(p.displayName).slice(0, 100);
+  const role = String(p.role || '');
+  const active = p.active !== false;
+  if (!/^[a-z0-9._@+-]{3,60}$/.test(username)) {
+    throw apiError_('Username must be 3-60 characters: letters, numbers, . _ - @ +', 'BAD_REQUEST');
+  }
+  if (ROLES.indexOf(role) === -1) throw apiError_('Choose a valid role.', 'BAD_REQUEST');
+  if (!canManageRole_(session, role)) throw apiError_('You can only manage volunteer accounts.', 'FORBIDDEN');
+
+  return withLock_(() => {
+    const found = findUser_(username);
+    if (!found) {
+      if (!p.isNew) throw apiError_('User not found.', 'NOT_FOUND');
+      validatePassword_(p.password);
+      createUser_(username, displayName || username, role, String(p.password));
+      return { created: true };
+    }
+    if (p.isNew) throw apiError_('A user with this username already exists.', 'BAD_REQUEST');
+    const oldRole = found.user.role;
+    if (!canManageRole_(session, oldRole)) throw apiError_('You can only manage volunteer accounts.', 'FORBIDDEN');
+    if (username === session.username && (role !== oldRole || !active)) {
+      throw apiError_('You cannot change your own role or deactivate yourself.', 'BAD_REQUEST');
+    }
+    if (oldRole === 'admin' && isActive_(found.user.active) && (role !== 'admin' || !active) && countActiveAdmins_() <= 1) {
+      throw apiError_('There must always be at least one active admin.', 'BAD_REQUEST');
+    }
+    const row = found.row;
+    found.sheet.getRange(row, found.idx.displayName + 1).setValue(safeCell_(displayName || username));
+    found.sheet.getRange(row, found.idx.role + 1).setValue(role);
+    found.sheet.getRange(row, found.idx.active + 1).setValue(active ? 'TRUE' : 'FALSE');
+    // A new role or a deactivation takes effect immediately: log them out everywhere.
+    if (role !== oldRole || !active) revokeSessions_(username);
+    return { created: false };
+  });
+}
+
+function resetUserPassword_(p, session) {
+  const username = normUsername_(p.username);
+  validatePassword_(p.password);
+  return withLock_(() => {
+    const found = findUser_(username);
+    if (!found) throw apiError_('User not found.', 'NOT_FOUND');
+    if (!canManageRole_(session, found.user.role)) throw apiError_('You can only manage volunteer accounts.', 'FORBIDDEN');
+    setPassword_(found, String(p.password));
+    if (username !== session.username) revokeSessions_(username);
+    return true;
+  });
+}
+
+function createUser_(username, displayName, role, password) {
+  const sheet = getSheet_(SHEETS.USERS);
+  const h = headerIndex_(sheet, USER_COLUMNS);
+  const row = new Array(h.width).fill('');
+  const salt = Utilities.getUuid().replace(/-/g, '');
+  row[h.idx.username] = username;
+  row[h.idx.displayName] = safeCell_(displayName);
+  row[h.idx.role] = role;
+  row[h.idx.active] = 'TRUE';
+  row[h.idx.salt] = salt;
+  row[h.idx.passwordHash] = hashPassword_(password, salt);
+  row[h.idx.createdAt] = nowIso_();
+  sheet.appendRow(row);
+}
+
+function countActiveAdmins_() {
+  const sheet = getSheet_(SHEETS.USERS);
+  const idx = headerIndex_(sheet, USER_COLUMNS).idx;
+  const last = sheet.getLastRow();
+  if (last < 2) return 0;
+  return sheet.getRange(2, 1, last - 1, sheet.getLastColumn()).getValues()
+    .filter(r => r[idx.role] === 'admin' && isActive_(r[idx.active])).length;
+}
+
+/* ------------------------------------------------------------------ */
 /* Donors                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -469,25 +679,33 @@ function onEdit() {
   } catch (e) { /* not critical: the cache also expires on its own */ }
 }
 
+/**
+ * Creates or updates a donor. A new donor with exactly the same phone AND name as an existing
+ * one is merged into it (only empty fields are filled) instead of creating a duplicate.
+ * Same phone with a different name is allowed (family members / friends sharing a phone).
+ * Optional p.donation { date, place, notes } records a donation in the same request.
+ * Returns { donor, merged }.
+ */
 function saveDonor_(p, session) {
   const donor = sanitizeDonor_(p.donor || {});
+  const donation = p.donation ? sanitizeDonation_(p.donation) : null;
+  requirePermission_(session, [donor.id ? 'editDonors' : 'addDonors']);
+  if (donation) requirePermission_(session, ['recordDonations']);
   return withLock_(() => {
     const sheet = getSheet_(SHEETS.DONORS);
     const h = headerIndex_(sheet, DONOR_COLUMNS);
     const idx = h.idx;
     const now = nowIso_();
+    const tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone();
 
     let rowNum = 0;
+    let merged = false;
     if (donor.id) {
       rowNum = findRowById_(sheet, idx.id, donor.id);
       if (!rowNum) throw apiError_('This donor no longer exists (maybe deleted). Refresh the list.', 'NOT_FOUND');
-    }
-
-    if (!p.force) {
-      const dup = findDuplicatePhone_(sheet, idx, donor.phone, rowNum);
-      if (dup) {
-        throw apiError_('A donor with this phone number already exists: ' + dup + '. Save anyway?', 'DUPLICATE');
-      }
+    } else {
+      rowNum = findExactMatch_(sheet, idx, donor.name, donor.phone);
+      merged = rowNum > 0;
     }
 
     let row;
@@ -498,16 +716,231 @@ function saveDonor_(p, session) {
       row[idx.id] = newId_();
       row[idx.createdAt] = now;
     }
-    EDITABLE_DONOR_FIELDS.forEach(k => { row[idx[k]] = safeCell_(donor[k]); });
+    if (merged) fillEmptyFields_(row, idx, donor);
+    else EDITABLE_DONOR_FIELDS.forEach(k => { row[idx[k]] = safeCell_(donor[k]); });
+    if (donation) applyDonation_(row, idx, donation.date, tz);
     row[idx.updatedAt] = now;
     row[idx.updatedBy] = session.username;
 
     if (rowNum) sheet.getRange(rowNum, 1, 1, h.width).setValues([row]);
     else sheet.appendRow(row);
+    if (donation) appendDonationRows_([donationRow_(row, idx, donation, session.username)]);
     invalidateDonorCache_();
 
-    return rowToDonor_(row, idx);
+    return { donor: donorFor_(session, rowToDonor_(row, idx)), merged: merged };
   });
+}
+
+/**
+ * Finds donors by name or phone for people who may not see the full list (e.g. a volunteer
+ * recording a donation). Needs 3+ letters or 4+ digits, returns at most SEARCH_LIMIT donors,
+ * and hides phone numbers unless the user may view donors.
+ */
+function searchDonors_(p, session) {
+  const q = String(p.query || '').trim().toLowerCase();
+  const qDigits = digits_(q);
+  const isPhone = /^[\d\s+()-]+$/.test(q);
+  if (isPhone ? qDigits.length < 4 : q.replace(/[^a-z଀-୿]/g, '').length < 3) return [];
+
+  const data = listDonors_({});
+  const f = {};
+  data.fields.forEach((k, i) => { f[k] = i; });
+  const words = q.split(/\s+/).filter(Boolean);
+  const out = [];
+  for (let i = 0; i < data.rows.length && out.length < SEARCH_LIMIT; i++) {
+    const r = data.rows[i];
+    const hit = isPhone
+      ? digits_(r[f.phone]).indexOf(qDigits) !== -1 || digits_(r[f.altPhone]).indexOf(qDigits) !== -1
+      : words.every(w => String(r[f.name]).toLowerCase().indexOf(w) !== -1);
+    if (hit) {
+      const d = {};
+      data.fields.forEach((k, j) => { d[k] = r[j]; });
+      out.push(donorFor_(session, d));
+    }
+  }
+  return out;
+}
+
+/** Full donor for users who may view donors; otherwise only what's needed to identify them. */
+function donorFor_(session, d) {
+  if (session.perms.viewDonors) return d;
+  return {
+    id: d.id, name: d.name, bloodGroup: d.bloodGroup, gender: d.gender,
+    phone: maskPhone_(d.phone), area: d.area, city: d.city,
+    lastDonated: d.lastDonated, totalDonations: d.totalDonations, availability: d.availability,
+    dateOfBirth: d.dateOfBirth, weightKg: d.weightKg, masked: true,
+  };
+}
+
+function maskPhone_(phone) {
+  const d = digits_(phone);
+  if (d.length < 6) return '******';
+  return d.slice(0, 2) + new Array(d.length - 3).join('*') + d.slice(-2);
+}
+
+/**
+ * Bulk import (admin). p.donors = array of donor objects (keys starting with "_" are ignored),
+ * each optionally with donations: [{ date, place, notes }].
+ * Exact phone + name matches (in the sheet or earlier in the same file) are merged.
+ * p.dryRun = true returns the same summary without writing anything (used for the preview).
+ */
+function importDonors_(p, session) {
+  const list = Array.isArray(p.donors) ? p.donors : [];
+  if (!list.length) throw apiError_('The file has no donors.', 'BAD_REQUEST');
+  if (list.length > 3000) throw apiError_('Import at most 3000 donors at a time.', 'BAD_REQUEST');
+
+  return withLock_(() => {
+    const sheet = getSheet_(SHEETS.DONORS);
+    const h = headerIndex_(sheet, DONOR_COLUMNS);
+    const idx = h.idx;
+    const tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone();
+    const now = nowIso_();
+    const last = sheet.getLastRow();
+    const values = last > 1 ? sheet.getRange(2, 1, last - 1, h.width).getValues() : [];
+
+    const byKey = {};
+    values.forEach(r => { if (r[idx.name] !== '') byKey[matchKey_(r[idx.name], r[idx.phone])] = r; });
+
+    const dSheet = getSheet_(SHEETS.DONATIONS);
+    const dIdx = headerIndex_(dSheet, DONATION_COLUMNS).idx;
+    const dLast = dSheet.getLastRow();
+    const seenDonations = {};
+    if (dLast > 1) {
+      dSheet.getRange(2, 1, dLast - 1, dSheet.getLastColumn()).getValues().forEach(r => {
+        seenDonations[r[dIdx.donorId] + '|' + cellOut_('date', r[dIdx.date], tz)] = true;
+      });
+    }
+
+    const result = { added: 0, merged: 0, donations: 0, skipped: [] };
+    const newRows = [];
+    const donationRows = [];
+    let existingChanged = false;
+
+    list.forEach((raw, i) => {
+      const clean = {};
+      Object.keys(raw || {}).forEach(k => { if (k.charAt(0) !== '_' && k !== 'id' && k !== 'donations') clean[k] = raw[k]; });
+      let d;
+      try {
+        d = sanitizeDonor_(clean);
+      } catch (e) {
+        result.skipped.push({ index: i + 1, name: String((raw && raw.name) || ''), reason: e.message });
+        return;
+      }
+      const donations = [];
+      (Array.isArray(raw.donations) ? raw.donations : []).forEach(x => {
+        try { donations.push(sanitizeDonation_(x)); } catch (e) { /* ignore a bad history entry */ }
+      });
+
+      const key = matchKey_(d.name, d.phone);
+      let row = byKey[key];
+      const createdNow = !row;
+      if (row) {
+        fillEmptyFields_(row, idx, d);
+        result.merged++;
+        if (!row._new) existingChanged = true;
+      } else {
+        row = new Array(h.width).fill('');
+        row._new = true;
+        row[idx.id] = newId_();
+        row[idx.createdAt] = now;
+        EDITABLE_DONOR_FIELDS.forEach(k => { row[idx[k]] = safeCell_(d[k]); });
+        newRows.push(row);
+        byKey[key] = row;
+        result.added++;
+      }
+      donations.forEach(don => {
+        const dk = row[idx.id] + '|' + don.date;
+        if (seenDonations[dk]) return;
+        seenDonations[dk] = true;
+        // A donor created from this record already has lastDonated / totalDonations from the
+        // file; for a merged donor the donation is added on top.
+        if (!createdNow) applyDonation_(row, idx, don.date, tz);
+        donationRows.push(donationRow_(row, idx, don, session.username));
+        result.donations++;
+      });
+      row[idx.updatedAt] = now;
+      row[idx.updatedBy] = session.username;
+    });
+
+    if (!p.dryRun) {
+      if (existingChanged) sheet.getRange(2, 1, values.length, h.width).setValues(values);
+      if (newRows.length) writeRows_(sheet, newRows.map(r => r.slice(0, h.width)));
+      if (donationRows.length) appendDonationRows_(donationRows);
+      invalidateDonorCache_();
+    }
+    return result;
+  });
+}
+
+/** Appends rows below the data in one call, as plain text (keeps phones like "+91..." intact). */
+function writeRows_(sheet, rows) {
+  const start = sheet.getLastRow() + 1;
+  const needed = start + rows.length - 1 - sheet.getMaxRows();
+  if (needed > 0) sheet.insertRowsAfter(sheet.getMaxRows(), needed);
+  const range = sheet.getRange(start, 1, rows.length, rows[0].length);
+  range.setNumberFormat('@');
+  range.setValues(rows);
+}
+
+/** Same person = same last 10 phone digits and same name (ignoring case, dots and spaces). */
+function matchKey_(name, phone) {
+  return digits_(phone).slice(-10) + '|' + String(name || '').toLowerCase().replace(/[^a-z଀-୿]/g, '');
+}
+
+function findExactMatch_(sheet, idx, name, phone) {
+  const last = sheet.getLastRow();
+  if (last < 2) return 0;
+  const key = matchKey_(name, phone);
+  const values = sheet.getRange(2, 1, last - 1, sheet.getLastColumn()).getValues();
+  for (let i = 0; i < values.length; i++) {
+    if (matchKey_(values[i][idx.name], values[i][idx.phone]) === key) return i + 2;
+  }
+  return 0;
+}
+
+/** Merge: copy only the fields that are empty in the existing row. */
+function fillEmptyFields_(row, idx, d) {
+  EDITABLE_DONOR_FIELDS.forEach(k => {
+    if (k === 'totalDonations' || k === 'availability' || k === 'lastDonated') return;
+    if ((row[idx[k]] === '' || row[idx[k]] === null) && d[k] !== '' && d[k] !== undefined) row[idx[k]] = safeCell_(d[k]);
+  });
+}
+
+/** Updates "last donated" (if newer) and the donation count on a donor row. */
+function applyDonation_(row, idx, date, tz) {
+  const current = cellOut_('lastDonated', row[idx.lastDonated], tz);
+  if (!current || date > current) row[idx.lastDonated] = date;
+  row[idx.totalDonations] = (parseInt(row[idx.totalDonations], 10) || 0) + 1;
+}
+
+function donationRow_(donorRow, idx, donation, username) {
+  return { donorId: donorRow[idx.id], donorName: donorRow[idx.name], bloodGroup: donorRow[idx.bloodGroup], donation: donation, username: username };
+}
+
+function appendDonationRows_(items) {
+  const dSheet = getSheet_(SHEETS.DONATIONS);
+  const dh = headerIndex_(dSheet, DONATION_COLUMNS);
+  const rows = items.map(it => {
+    const r = new Array(dh.width).fill('');
+    r[dh.idx.id] = newId_();
+    r[dh.idx.donorId] = it.donorId;
+    r[dh.idx.donorName] = it.donorName;
+    r[dh.idx.bloodGroup] = it.bloodGroup;
+    r[dh.idx.date] = it.donation.date;
+    r[dh.idx.place] = safeCell_(it.donation.place);
+    r[dh.idx.notes] = safeCell_(it.donation.notes);
+    r[dh.idx.recordedBy] = it.username;
+    r[dh.idx.recordedAt] = nowIso_();
+    return r;
+  });
+  writeRows_(dSheet, rows);
+}
+
+function sanitizeDonation_(d) {
+  const date = normalizeDate_(d && d.date);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw apiError_('Enter a valid donation date.', 'BAD_REQUEST');
+  if (date > todayStr_()) throw apiError_('Donation date cannot be in the future.', 'BAD_REQUEST');
+  return { date: date, place: cleanText_(d.place), notes: cleanText_(d.notes) };
 }
 
 function deleteDonor_(p) {
@@ -529,9 +962,7 @@ function deleteDonor_(p) {
 
 function recordDonation_(p, session) {
   const donorId = String(p.donorId || '');
-  const date = normalizeDate_(p.date);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw apiError_('Enter a valid donation date.', 'BAD_REQUEST');
-  if (date > todayStr_()) throw apiError_('Donation date cannot be in the future.', 'BAD_REQUEST');
+  const donation = sanitizeDonation_(p);
 
   return withLock_(() => {
     const sheet = getSheet_(SHEETS.DONORS);
@@ -542,29 +973,14 @@ function recordDonation_(p, session) {
 
     const tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone();
     const row = sheet.getRange(rowNum, 1, 1, h.width).getValues()[0];
-    const current = cellOut_('lastDonated', row[idx.lastDonated], tz);
-    if (!current || date > current) row[idx.lastDonated] = date;
-    row[idx.totalDonations] = (parseInt(row[idx.totalDonations], 10) || 0) + 1;
+    applyDonation_(row, idx, donation.date, tz);
     row[idx.updatedAt] = nowIso_();
     row[idx.updatedBy] = session.username;
     sheet.getRange(rowNum, 1, 1, h.width).setValues([row]);
-
-    const dSheet = getSheet_(SHEETS.DONATIONS);
-    const dh = headerIndex_(dSheet, DONATION_COLUMNS);
-    const dRow = new Array(dh.width).fill('');
-    dRow[dh.idx.id] = newId_();
-    dRow[dh.idx.donorId] = donorId;
-    dRow[dh.idx.donorName] = row[idx.name];
-    dRow[dh.idx.bloodGroup] = row[idx.bloodGroup];
-    dRow[dh.idx.date] = date;
-    dRow[dh.idx.place] = safeCell_(cleanText_(p.place));
-    dRow[dh.idx.notes] = safeCell_(cleanText_(p.notes));
-    dRow[dh.idx.recordedBy] = session.username;
-    dRow[dh.idx.recordedAt] = nowIso_();
-    dSheet.appendRow(dRow);
+    appendDonationRows_([donationRow_(row, idx, donation, session.username)]);
     invalidateDonorCache_();
 
-    return rowToDonor_(row, idx);
+    return donorFor_(session, rowToDonor_(row, idx));
   });
 }
 
@@ -637,21 +1053,6 @@ function safeCell_(v) {
 
 function digits_(v) {
   return String(v || '').replace(/\D/g, '');
-}
-
-function findDuplicatePhone_(sheet, idx, phone, ignoreRow) {
-  const last = sheet.getLastRow();
-  if (last < 2) return null;
-  const key = digits_(phone).slice(-10);
-  const values = sheet.getRange(2, 1, last - 1, sheet.getLastColumn()).getValues();
-  for (let i = 0; i < values.length; i++) {
-    if (i + 2 === ignoreRow) continue;
-    const r = values[i];
-    if (digits_(r[idx.phone]).slice(-10) === key || (r[idx.altPhone] && digits_(r[idx.altPhone]).slice(-10) === key)) {
-      return r[idx.name] + ' (' + r[idx.bloodGroup] + ')';
-    }
-  }
-  return null;
 }
 
 function findRowById_(sheet, idCol, id) {
@@ -814,8 +1215,8 @@ function menuAddUser() {
     if (found && ui.alert('User "' + username + '" exists. Reset their password?', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
 
     const displayName = found ? found.user.displayName : ask('Add user (2/4)', 'Display name (e.g. Ravi Kumar):');
-    const role = found ? found.user.role : ask('Add user (3/4)', 'Role: type admin or volunteer\n(admin can also delete donors)').toLowerCase();
-    if (ROLES.indexOf(role) === -1) return ui.alert('Role must be "admin" or "volunteer".');
+    const role = found ? found.user.role : ask('Add user (3/4)', 'Role: type admin, manager or volunteer\n(set what managers and volunteers may do on the app\'s Permissions page)').toLowerCase();
+    if (ROLES.indexOf(role) === -1) return ui.alert('Role must be "admin", "manager" or "volunteer".');
     const password = ask('Add user (4/4)', 'Password (min ' + CONFIG.MIN_PASSWORD_LENGTH + ' characters). Share it privately with the user.');
     validatePassword_(password);
 
@@ -824,18 +1225,7 @@ function menuAddUser() {
         setPassword_(found, password);
         revokeSessions_(username);
       } else {
-        const sheet = getSheet_(SHEETS.USERS);
-        const h = headerIndex_(sheet, USER_COLUMNS);
-        const row = new Array(h.width).fill('');
-        const salt = Utilities.getUuid().replace(/-/g, '');
-        row[h.idx.username] = username;
-        row[h.idx.displayName] = safeCell_(displayName || username);
-        row[h.idx.role] = role;
-        row[h.idx.active] = 'TRUE';
-        row[h.idx.salt] = salt;
-        row[h.idx.passwordHash] = hashPassword_(password, salt);
-        row[h.idx.createdAt] = nowIso_();
-        sheet.appendRow(row);
+        createUser_(username, displayName || username, role, password);
       }
     });
     ui.alert(found ? 'Password reset for "' + username + '".' : 'User "' + username + '" created.');

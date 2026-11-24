@@ -42,3 +42,27 @@ export const EMPTY_DONOR = {
   notes: '',
   source: '',
 };
+
+export const ROLES = ['admin', 'manager', 'volunteer'];
+
+// Must match PERMISSIONS in backend/Code.gs. The server enforces them; the app only hides
+// what the user can't use.
+export const PERMISSIONS = [
+  { key: 'viewDonors', label: 'See donor list & Find Blood', hint: 'Full list, phone numbers and details. Without it they can only search a person by name/phone to record a donation (phones hidden).' },
+  { key: 'addDonors', label: 'Add new donors' },
+  { key: 'recordDonations', label: 'Record donations' },
+  { key: 'editDonors', label: 'Edit donor details', needsView: true },
+  { key: 'deleteDonors', label: 'Delete donors', needsView: true },
+  { key: 'exportDonors', label: 'Export donor list (Excel)', needsView: true },
+  { key: 'importDonors', label: 'Import donors from a file', needsView: true },
+  { key: 'manageSettings', label: 'Change eligibility rules' },
+  { key: 'manageVolunteers', label: 'Manage volunteer accounts', hint: 'Add, activate / deactivate and reset passwords of volunteers.' },
+];
+
+export const ALL_PERMISSIONS = Object.fromEntries(PERMISSIONS.map((p) => [p.key, true]));
+
+/** Used with an older backend that doesn't send permissions yet. */
+export function legacyPermissions(role) {
+  if (role === 'admin') return ALL_PERMISSIONS;
+  return { ...Object.fromEntries(PERMISSIONS.map((p) => [p.key, false])), viewDonors: true, addDonors: true, editDonors: true, recordDonations: true, exportDonors: true };
+}

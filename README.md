@@ -18,7 +18,10 @@ donors who can give blood **right now** when someone calls with an emergency.
   filters for eligibility and availability, sorting, and CSV export.
 - **Donation records.** Saving a donation updates "last donated" and the donation count, and keeps the history.
 - **Duplicate check** on phone numbers.
-- **Roles.** Admins can also delete donors. Users are managed from a menu inside the Google Sheet.
+- **Roles and permissions.** Admin (everything), Manager and Volunteer. The admin decides what managers and
+  volunteers may do on the Permissions page. By default volunteers can only add donors and record donations: they
+  never receive the donor list, and searches return at most 10 people with hidden phone numbers. Permissions are
+  enforced by the server. Users are added, activated / deactivated and reset from the Users page.
 - **Mobile-friendly**, and can be added to the phone home screen.
 
 ## Donor information stored

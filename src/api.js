@@ -59,8 +59,9 @@ export function getCachedData(username) {
   return d && d.username === username ? d : null;
 }
 
-export function saveCachedData(username, settings, donors) {
-  writeJson(DATA_KEY, { username, settings, donors, savedAt: Date.now() });
+/** donors = null for roles that may not view the donor list: nothing about donors is stored. */
+export function saveCachedData(username, settings, donors, permissions) {
+  writeJson(DATA_KEY, { username, settings, donors, permissions, savedAt: Date.now() });
 }
 
 async function call(action, payload = {}) {
@@ -145,7 +146,27 @@ export const api = {
     }
   },
   saveSettings: (settings) => call('saveSettings', { settings }),
-  saveDonor: (donor, force = false) => call('saveDonor', { donor, force }),
+  /**
+   * Saves a donor, optionally recording a donation in the same request.
+   * Returns { donor, merged } — merged = an existing donor with the same phone and name was used.
+   */
+  async saveDonor(donor, donation = null) {
+    const res = await call('saveDonor', { donor, donation });
+    if (res && res.donor) return res;
+    // Older backend: returns the donor itself and ignores the donation.
+    if (donation) {
+      return { donor: await api.recordDonation(res.id, donation.date, donation.place, donation.notes), merged: false };
+    }
+    return { donor: res, merged: false };
+  },
+  /** Admin bulk import. dryRun = preview only. Returns { added, merged, donations, skipped }. */
+  importDonors: (donors, dryRun) => call('importDonors', { donors, dryRun }),
+  /** Name / phone search on the server (max 10; phones masked for roles that can't view donors). */
+  searchDonors: (query) => call('searchDonors', { query }),
+  listUsers: () => call('listUsers'),
+  saveUser: (user) => call('saveUser', user),
+  resetUserPassword: (username, password) => call('resetUserPassword', { username, password }),
+  savePermissions: (permissions) => call('savePermissions', { permissions }),
   deleteDonor: (id) => call('deleteDonor', { id }),
   recordDonation: (donorId, date, place, notes) => call('recordDonation', { donorId, date, place, notes }),
   listDonations: (donorId) => call('listDonations', { donorId }),

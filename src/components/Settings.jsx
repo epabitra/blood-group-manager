@@ -3,6 +3,7 @@ import { api } from '../api';
 import { DEFAULT_SETTINGS } from '../constants';
 import { Spinner } from './ui';
 import InstallCard from './InstallCard';
+import ImportDonors from './ImportDonors';
 
 const RULES = [
   { key: 'gapMale', label: 'Waiting period – men', unit: 'days', min: 30, max: 730 },
@@ -15,6 +16,7 @@ const RULES = [
 
 export default function Settings({
   session,
+  perms,
   isAdmin,
   settings,
   onSettingsSaved,
@@ -23,6 +25,7 @@ export default function Settings({
   onToast,
   lastSync,
   donorCount,
+  onImported,
 }) {
   const { user } = session;
 
@@ -40,24 +43,57 @@ export default function Settings({
         </button>
       </section>
 
+      {(perms.manageVolunteers || isAdmin) && (
+        <section className="card menu-list">
+          {perms.manageVolunteers && (
+            <a href="#/users" className="menu-item">
+              <span className="menu-icon">👤</span>
+              <span className="grow">
+                <strong>Users</strong>
+                <small className="muted">
+                  {isAdmin ? 'Add users, change roles, activate / deactivate' : 'Add and activate / deactivate volunteers'}
+                </small>
+              </span>
+              <span className="chev">›</span>
+            </a>
+          )}
+          {isAdmin && (
+            <a href="#/permissions" className="menu-item">
+              <span className="menu-icon">🔐</span>
+              <span className="grow">
+                <strong>Permissions</strong>
+                <small className="muted">What managers and volunteers are allowed to do</small>
+              </span>
+              <span className="chev">›</span>
+            </a>
+          )}
+        </section>
+      )}
+
       <InstallCard />
 
       {/* key: reset the form when newer settings arrive from the server */}
-      <EligibilityRules key={JSON.stringify(settings)} isAdmin={isAdmin} settings={settings} onSaved={onSettingsSaved} />
+      <EligibilityRules
+        key={JSON.stringify(settings)}
+        isAdmin={Boolean(perms.manageSettings)}
+        settings={settings}
+        onSaved={onSettingsSaved}
+      />
+
+      {perms.importDonors && <ImportDonors onImported={onImported} onToast={onToast} />}
 
       <ChangePassword setSession={setSession} onToast={onToast} />
 
       <section className="card small">
         <h3>About this device</h3>
         <p className="muted">
-          {donorCount} donors saved on this phone for fast opening
-          {lastSync ? `, last updated ${new Date(lastSync).toLocaleString()}` : ''}. The copy is deleted when you log
-          out.
+          {donorCount === null
+            ? 'No donor list is stored on this phone.'
+            : `${donorCount} donors saved on this phone for fast opening${
+                lastSync ? `, last updated ${new Date(lastSync).toLocaleString()}` : ''
+              }. The copy is deleted when you log out.`}
         </p>
-        <p className="muted">
-          Login stays active for 7 days on this device. New users and password resets are done by an admin from the
-          Google Sheet menu <strong>Blood Bank</strong>.
-        </p>
+        <p className="muted">Login stays active for 7 days on this device, unless the admin deactivates the account.</p>
       </section>
     </div>
   );
@@ -97,7 +133,7 @@ function EligibilityRules({ isAdmin, settings, onSaved }) {
         <h3>Donation eligibility rules</h3>
         <p className="muted small">
           Used to decide who is "Ready now". Changes apply to everyone using the app.
-          {!isAdmin && ' Only an admin can change these.'}
+          {!isAdmin && ' You do not have permission to change these.'}
         </p>
       </div>
 

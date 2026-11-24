@@ -1,55 +1,95 @@
-import { useDeferredValue, useMemo, useState } from 'react';
+import { useState } from 'react';
 import { api } from '../api';
-import { formatDate, matchesQuery, timeAgo, todayStr } from '../utils';
+import { useDonorSearch } from '../useDonorSearch';
+import { eligibility, formatDate, timeAgo, todayStr } from '../utils';
 import { BloodBadge, EmptyState, Modal, SearchInput, Spinner, StatusPill } from './ui';
 
-const MAX_RESULTS = 25;
-
-/** Two steps: search a donor (name / phone) → enter date and place → save. */
-export default function RecordDonation({ donors, initialDonorId, onClose, onSaved, onAddDonor }) {
-  const [donorId, setDonorId] = useState(initialDonorId);
-  const donor = donorId ? donors.find((d) => d.id === donorId) : null;
+/**
+ * Two steps: search a donor (name / phone) → enter date and place → save.
+ * initialDonor: a donor object from a server search (users who can't view the full list).
+ */
+export default function RecordDonation({
+  donors,
+  canView,
+  settings,
+  initialDonorId,
+  initialDonor,
+  onClose,
+  onSaved,
+  onAddDonor,
+}) {
+  const [picked, setPicked] = useState(initialDonor || null);
+  const [donorId, setDonorId] = useState(initialDonor ? null : initialDonorId);
+  const donor = picked || (donorId ? donors.find((d) => d.id === donorId) : null);
+  const startedWithDonor = Boolean(initialDonor || initialDonorId);
 
   return donor ? (
     <DonationForm
       donor={donor}
-      onBack={initialDonorId ? onClose : () => setDonorId(null)}
+      settings={settings}
+      onBack={
+        startedWithDonor
+          ? onClose
+          : () => {
+              setPicked(null);
+              setDonorId(null);
+            }
+      }
       onClose={onClose}
       onSaved={onSaved}
     />
   ) : (
-    <DonorPicker donors={donors} onPick={setDonorId} onClose={onClose} onAddDonor={onAddDonor} />
+    <DonorPicker
+      donors={donors}
+      canView={canView}
+      settings={settings}
+      onPick={setPicked}
+      onClose={onClose}
+      onAddDonor={onAddDonor}
+    />
   );
 }
 
-function DonorPicker({ donors, onPick, onClose, onAddDonor }) {
+function DonorPicker({ donors, canView, settings, onPick, onClose, onAddDonor }) {
   const [query, setQuery] = useState('');
-  const q = useDeferredValue(query);
-
-  const results = useMemo(() => {
-    if (!q.trim()) return [];
-    return donors.filter((d) => matchesQuery(d, q)).slice(0, MAX_RESULTS);
-  }, [donors, q]);
+  const { results, loading, error, tooShort } = useDonorSearch(query, { canView, donors, settings, limit: 25 });
 
   return (
     <Modal title="Record donation" onClose={onClose}>
       <p className="muted small">Who donated? Search by name or phone number.</p>
       <SearchInput value={query} onChange={setQuery} placeholder="Name or phone" autoFocus />
+      {onAddDonor && (
+        <button className="btn ghost small mt" onClick={() => onAddDonor(query.trim())}>
+          ＋ First-time donor? Add them + record donation
+        </button>
+      )}
 
       <div className="pick-list">
-        {!q.trim() ? (
+        {!query.trim() ? (
           <p className="muted small center">Start typing to find the donor.</p>
+        ) : tooShort ? (
+          <p className="muted small center">Type at least 3 letters of the name or 4 digits of the phone.</p>
+        ) : loading ? (
+          <p className="muted small center">
+            <Spinner small /> Searching…
+          </p>
+        ) : error ? (
+          <p className="error">{error}</p>
         ) : results.length === 0 ? (
           <EmptyState>
             No donor found.
-            <br />
-            <button className="btn primary small mt" onClick={onAddDonor}>
-              ＋ Add new donor first
-            </button>
+            {onAddDonor && (
+              <>
+                <br />
+                <button className="btn primary small mt" onClick={() => onAddDonor(query.trim())}>
+                  ＋ New donor + record donation
+                </button>
+              </>
+            )}
           </EmptyState>
         ) : (
           results.map((d) => (
-            <button key={d.id} className="pick-item" onClick={() => onPick(d.id)}>
+            <button key={d.id} className="pick-item" onClick={() => onPick(d)}>
               <BloodBadge group={d.bloodGroup} />
               <span className="pick-main">
                 <span className="donor-name">{d.name}</span>
@@ -66,7 +106,7 @@ function DonorPicker({ donors, onPick, onClose, onAddDonor }) {
   );
 }
 
-function DonationForm({ donor, onBack, onClose, onSaved }) {
+function DonationForm({ donor, settings, onBack, onClose, onSaved }) {
   const [date, setDate] = useState(todayStr());
   const [place, setPlace] = useState('');
   const [notes, setNotes] = useState('');
@@ -85,7 +125,8 @@ function DonationForm({ donor, onBack, onClose, onSaved }) {
     }
   };
 
-  const waiting = donor._elig.status === 'waiting';
+  const elig = donor._elig || eligibility(donor, settings);
+  const waiting = elig.status === 'waiting';
 
   return (
     <Modal
@@ -111,7 +152,7 @@ function DonationForm({ donor, onBack, onClose, onSaved }) {
             Last donated: {donor.lastDonated ? formatDate(donor.lastDonated) : 'never / unknown'} · Total:{' '}
             {donor.totalDonations || 0}
           </div>
-          <StatusPill elig={donor._elig} />
+          <StatusPill elig={elig} />
         </div>
       </div>
 

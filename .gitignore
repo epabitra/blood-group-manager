@@ -35,6 +35,11 @@ id_ed25519*
 *.ods
 *.tsv
 donors*.json
+old_entries/
+import/
+*.jpg
+*.jpeg
+*.heic
 backup/
 backups/
 *.backup

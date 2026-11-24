@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, getCachedData, getSession, saveCachedData, setSessionLostHandler, toDonors } from './api';
-import { DEFAULT_SETTINGS } from './constants';
+import { DEFAULT_SETTINGS, legacyPermissions } from './constants';
 import { eligibility, searchText } from './utils';
 import Login from './components/Login';
 import Home from './components/Home';
@@ -10,6 +10,8 @@ import DonorForm from './components/DonorForm';
 import DonorDetails from './components/DonorDetails';
 import RecordDonation from './components/RecordDonation';
 import Settings from './components/Settings';
+import Users from './components/Users';
+import Permissions from './components/Permissions';
 import { Spinner } from './components/ui';
 
 export default function App() {
@@ -30,34 +32,49 @@ export default function App() {
   );
 }
 
-const VIEWS = ['home', 'find', 'donors', 'settings'];
+const VIEWS = ['home', 'find', 'donors', 'settings', 'users', 'permissions'];
 
 function readHash() {
   const [view, param] = window.location.hash.replace(/^#\/?/, '').split('/');
   return { view: VIEWS.includes(view) ? view : 'home', param: param ? decodeURIComponent(param) : '' };
 }
 
+/** Permissions from the server; an older backend sends none, so fall back to the old rules. */
+function permsFrom(data, role) {
+  return data ? data.permissions || legacyPermissions(role) : null;
+}
+
+/** Donor list from start-up data: null = not loaded yet, [] for roles that can't view donors. */
+function donorsFrom(data, perms) {
+  if (!data || !perms) return null;
+  if (!perms.viewDonors) return [];
+  return Array.isArray(data.donors) ? data.donors : data.donors ? toDonors(data.donors) : null;
+}
+
 function Main({ session, initialData, setSession }) {
-  const username = session.user.username;
+  const { username, role } = session.user;
   const cached = useRef(initialData ? null : getCachedData(username)).current;
+  const start = initialData
+    ? { ...initialData, donors: initialData.donors && toDonors(initialData.donors) }
+    : cached && { ...cached, permissions: cached.permissions };
 
   const [route, setRoute] = useState(readHash);
-  const [settings, setSettings] = useState(
-    initialData?.settings || cached?.settings || DEFAULT_SETTINGS,
-  );
-  const [rawDonors, setRawDonors] = useState(() =>
-    initialData ? toDonors(initialData.donors) : cached?.donors || null,
-  );
+  const [settings, setSettings] = useState(start?.settings || DEFAULT_SETTINGS);
+  const [perms, setPerms] = useState(() => (cached && !cached.permissions ? null : permsFrom(start, role)));
+  const [rolePermissions, setRolePermissions] = useState(start?.rolePermissions || null);
+  const [rawDonors, setRawDonors] = useState(() => donorsFrom(start, permsFrom(start, role)));
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState('');
   const [lastSync, setLastSync] = useState(initialData ? Date.now() : cached?.savedAt || null);
 
-  const [editing, setEditing] = useState(null); // donor object for the form, or null
+  const [editing, setEditing] = useState(null); // { donor, recordDonation } for the form, or null
   const [viewingId, setViewingId] = useState(null);
-  const [recording, setRecording] = useState(null); // { donorId } or null
+  const [recording, setRecording] = useState(null); // { donorId, donor } or null
   const [toast, setToast] = useState('');
 
-  const isAdmin = session.user.role === 'admin';
+  const isAdmin = role === 'admin';
+  const p = perms || {};
+  const canView = Boolean(p.viewDonors);
 
   // Search text and eligibility are computed once per donor here, so screens stay fast.
   const donors = useMemo(
@@ -65,10 +82,10 @@ function Main({ session, initialData, setSession }) {
     [rawDonors, settings],
   );
 
-  // Keep the on-device copy in sync with every change.
+  // Keep the on-device copy in sync. Roles that can't view donors store no donor data at all.
   useEffect(() => {
-    if (rawDonors) saveCachedData(username, settings, rawDonors);
-  }, [rawDonors, settings, username]);
+    if (perms && rawDonors) saveCachedData(username, settings, perms.viewDonors ? rawDonors : null, perms);
+  }, [rawDonors, settings, perms, username]);
 
   useEffect(() => {
     const onHash = () => setRoute(readHash());
@@ -81,20 +98,26 @@ function Main({ session, initialData, setSession }) {
     window.scrollTo(0, 0);
   };
 
-  const sync = useCallback(async (fresh) => {
-    setSyncing(true);
-    setSyncError('');
-    try {
-      const data = await api.bootstrap(fresh);
-      setSettings(data.settings);
-      setRawDonors(toDonors(data.donors));
-      setLastSync(Date.now());
-    } catch (e) {
-      setSyncError(e.message);
-    } finally {
-      setSyncing(false);
-    }
-  }, []);
+  const sync = useCallback(
+    async (fresh) => {
+      setSyncing(true);
+      setSyncError('');
+      try {
+        const data = await api.bootstrap(fresh);
+        const newPerms = permsFrom(data, role);
+        setSettings(data.settings);
+        setPerms(newPerms);
+        setRolePermissions(data.rolePermissions || null);
+        setRawDonors(donorsFrom(data, newPerms) || []);
+        setLastSync(Date.now());
+      } catch (e) {
+        setSyncError(e.message);
+      } finally {
+        setSyncing(false);
+      }
+    },
+    [role],
+  );
 
   // Show the saved copy instantly, then fetch the latest data in the background.
   useEffect(() => {
@@ -109,6 +132,7 @@ function Main({ session, initialData, setSession }) {
 
   // Update the local list after a save instead of reloading everything.
   const upsert = (donor) => {
+    if (!canView || donor.masked) return;
     setRawDonors((list) => {
       const i = list.findIndex((d) => d.id === donor.id);
       if (i === -1) return [donor, ...list];
@@ -129,11 +153,28 @@ function Main({ session, initialData, setSession }) {
     setSession(null);
   };
 
-  const openRecord = (donorId) => setRecording({ donorId: donorId || null });
+  const openRecord = (donorOrId) =>
+    setRecording(
+      typeof donorOrId === 'object' && donorOrId
+        ? { donorId: donorOrId.id, donor: donorOrId }
+        : { donorId: donorOrId || null, donor: null },
+    );
+  const openAdd = (donor = {}, recordDonation = false) => setEditing({ donor, recordDonation });
   const viewing = viewingId ? donors.find((d) => d.id === viewingId) : null;
 
+  // Pages the user may open.
+  const allowed = {
+    home: true,
+    settings: true,
+    find: canView,
+    donors: canView,
+    users: Boolean(p.manageVolunteers),
+    permissions: isAdmin,
+  };
+  const view = allowed[route.view] ? route.view : 'home';
+
   let content;
-  if (!rawDonors) {
+  if (!perms || !rawDonors) {
     content = syncError ? (
       <div className="center-box">
         <p className="error">{syncError}</p>
@@ -143,10 +184,10 @@ function Main({ session, initialData, setSession }) {
       </div>
     ) : (
       <div className="center-box">
-        <Spinner /> <p className="muted">Loading donors…</p>
+        <Spinner /> <p className="muted">Loading…</p>
       </div>
     );
-  } else if (route.view === 'find') {
+  } else if (view === 'find') {
     content = (
       <FindDonors
         donors={donors}
@@ -155,20 +196,35 @@ function Main({ session, initialData, setSession }) {
         onOpen={setViewingId}
       />
     );
-  } else if (route.view === 'donors') {
+  } else if (view === 'donors') {
     content = (
       <DonorList
         donors={donors}
         initialGroup={route.param}
         onOpen={setViewingId}
-        onAdd={() => setEditing({})}
-        onRecord={openRecord}
+        onAdd={p.addDonors ? () => openAdd() : null}
+        onRecord={p.recordDonations ? openRecord : null}
+        canExport={Boolean(p.exportDonors)}
       />
     );
-  } else if (route.view === 'settings') {
+  } else if (view === 'users') {
+    content = <Users session={session} onToast={setToast} />;
+  } else if (view === 'permissions') {
+    content = (
+      <Permissions
+        key={JSON.stringify(rolePermissions)}
+        rolePermissions={rolePermissions}
+        onSaved={(rp) => {
+          setRolePermissions(rp);
+          setToast('Permissions saved. They apply immediately.');
+        }}
+      />
+    );
+  } else if (view === 'settings') {
     content = (
       <Settings
         session={session}
+        perms={p}
         isAdmin={isAdmin}
         settings={settings}
         onSettingsSaved={(s) => {
@@ -179,22 +235,44 @@ function Main({ session, initialData, setSession }) {
         onLogout={logout}
         onToast={setToast}
         lastSync={lastSync}
-        donorCount={donors.length}
+        donorCount={canView ? donors.length : null}
+        onImported={() => sync(true)}
       />
     );
   } else {
     content = (
       <Home
         session={session}
+        perms={p}
         donors={donors}
+        settings={settings}
         onFind={(g) => go('find', g)}
         onBrowse={(g) => go('donors', g)}
-        onAdd={() => setEditing({})}
-        onRecord={() => openRecord()}
-        onOpen={setViewingId}
+        onAdd={p.addDonors ? (prefill) => openAdd(prefill) : null}
+        onRecord={p.recordDonations ? openRecord : null}
+        onOpen={canView ? setViewingId : null}
       />
     );
   }
+
+  const navItems = [
+    <NavItem key="home" href="#/home" active={view === 'home'} icon="⌂" label="Home" />,
+    canView && <NavItem key="find" href="#/find" active={view === 'find'} icon="🔍" label="Find Blood" />,
+    p.recordDonations && (
+      <button key="rec" className="nav-record" onClick={() => openRecord()} aria-label="Record donation">
+        <span className="plus">＋</span>
+        <span className="label">Donation</span>
+      </button>
+    ),
+    canView && <NavItem key="donors" href="#/donors" active={view === 'donors'} icon="👥" label="Donors" />,
+    <NavItem
+      key="settings"
+      href="#/settings"
+      active={['settings', 'users', 'permissions'].includes(view)}
+      icon="⚙"
+      label="Settings"
+    />,
+  ].filter(Boolean);
 
   return (
     <div className="app">
@@ -222,25 +300,30 @@ function Main({ session, initialData, setSession }) {
 
       <main className="container">{content}</main>
 
-      <nav className="bottom-nav" aria-label="Main">
-        <NavItem href="#/home" active={route.view === 'home'} icon="⌂" label="Home" />
-        <NavItem href="#/find" active={route.view === 'find'} icon="🔍" label="Find Blood" />
-        <button className="nav-record" onClick={() => openRecord()} aria-label="Record donation">
-          <span className="plus">＋</span>
-          <span className="label">Donation</span>
-        </button>
-        <NavItem href="#/donors" active={route.view === 'donors'} icon="👥" label="Donors" />
-        <NavItem href="#/settings" active={route.view === 'settings'} icon="⚙" label="Settings" />
+      <nav className="bottom-nav" aria-label="Main" style={{ gridTemplateColumns: `repeat(${navItems.length}, 1fr)` }}>
+        {navItems}
       </nav>
 
       {editing && (
         <DonorForm
-          donor={editing}
+          donor={editing.donor}
+          donors={donors}
+          canView={canView}
+          canRecord={Boolean(p.recordDonations)}
+          settings={settings}
+          recordDonation={editing.recordDonation}
           onClose={() => setEditing(null)}
-          onSaved={(d) => {
+          onPickExisting={(d, donated) => {
+            setEditing(null);
+            if (donated || !canView) openRecord(d);
+            else setViewingId(d.id);
+          }}
+          onSaved={(d, { merged, donated }) => {
             upsert(d);
             setEditing(null);
-            setToast(editing.id ? 'Donor updated' : 'Donor added');
+            if (editing.donor.id) setToast('Donor updated');
+            else if (merged) setToast(`${d.name} was already saved — ${donated ? 'donation added' : 'record updated'}`);
+            else setToast(donated ? `${d.name} added and donation recorded` : `${d.name} added`);
           }}
         />
       )}
@@ -248,9 +331,11 @@ function Main({ session, initialData, setSession }) {
         <DonorDetails
           donor={viewing}
           settings={settings}
-          isAdmin={isAdmin}
+          canEdit={Boolean(p.editDonors)}
+          canDelete={Boolean(p.deleteDonors)}
+          canRecord={Boolean(p.recordDonations)}
           onClose={() => setViewingId(null)}
-          onEdit={() => setEditing(viewing)}
+          onEdit={() => setEditing({ donor: viewing })}
           onRecord={() => openRecord(viewing.id)}
           onDeleted={() => {
             remove(viewing.id);
@@ -262,12 +347,21 @@ function Main({ session, initialData, setSession }) {
       {recording && (
         <RecordDonation
           donors={donors}
+          canView={canView}
+          settings={settings}
           initialDonorId={recording.donorId}
+          initialDonor={recording.donor}
           onClose={() => setRecording(null)}
-          onAddDonor={() => {
-            setRecording(null);
-            setEditing({});
-          }}
+          onAddDonor={
+            p.addDonors
+              ? (query) => {
+                  setRecording(null);
+                  // Carry over what was typed in the search box.
+                  const isPhone = /^[\d\s+()-]{4,}$/.test(query || '');
+                  openAdd(isPhone ? { phone: query } : { name: query || '' }, true);
+                }
+              : null
+          }
           onSaved={(d) => {
             upsert(d);
             setRecording(null);

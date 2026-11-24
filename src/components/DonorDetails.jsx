@@ -3,7 +3,7 @@ import { api } from '../api';
 import { ageFrom, formatDate, gapDays, timeAgo } from '../utils';
 import { BloodBadge, ContactButtons, Modal, Spinner, StatusPill } from './ui';
 
-export default function DonorDetails({ donor, settings, isAdmin, onClose, onEdit, onRecord, onDeleted }) {
+export default function DonorDetails({ donor, settings, canEdit, canDelete, canRecord, onClose, onEdit, onRecord, onDeleted }) {
   const [history, setHistory] = useState(null);
   const [historyError, setHistoryError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -62,14 +62,20 @@ export default function DonorDetails({ donor, settings, isAdmin, onClose, onEdit
       onClose={onClose}
       wide
       footer={
-        <>
-          <button className="btn ghost" onClick={onEdit}>
-            ✎ Edit
-          </button>
-          <button className="btn primary grow" onClick={onRecord}>
-            ＋ Record donation
-          </button>
-        </>
+        canEdit || canRecord ? (
+          <>
+            {canEdit && (
+              <button className="btn ghost" onClick={onEdit}>
+                ✎ Edit
+              </button>
+            )}
+            {canRecord && (
+              <button className="btn primary grow" onClick={onRecord}>
+                ＋ Record donation
+              </button>
+            )}
+          </>
+        ) : null
       }
     >
       <div className="details-head">
@@ -111,7 +117,7 @@ export default function DonorDetails({ donor, settings, isAdmin, onClose, onEdit
         </ul>
       )}
 
-      {isAdmin && (
+      {canDelete && (
         <div className="danger-zone">
           {error && <p className="error">{error}</p>}
           {confirmDelete ? (

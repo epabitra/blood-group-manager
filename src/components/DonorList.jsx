@@ -33,7 +33,7 @@ const CSV_COLUMNS = [
   ['Registered At', 'source'],
 ].map(([label, key]) => ({ label, get: (d) => d[key] }));
 
-export default function DonorList({ donors, initialGroup, onOpen, onAdd, onRecord }) {
+export default function DonorList({ donors, initialGroup, onOpen, onAdd, onRecord, canExport }) {
   const [group, setGroup] = useState(BLOOD_GROUPS.includes(initialGroup) ? initialGroup : '');
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState('');
@@ -73,9 +73,11 @@ export default function DonorList({ donors, initialGroup, onOpen, onAdd, onRecor
     <div className="stack">
       <div className="row-between">
         <h2 className="m0">Donors</h2>
-        <button className="btn primary small" onClick={onAdd}>
-          ＋ Add donor
-        </button>
+        {onAdd && (
+          <button className="btn primary small" onClick={onAdd}>
+            ＋ Add donor
+          </button>
+        )}
       </div>
 
       <div className="sticky-search">
@@ -147,13 +149,15 @@ export default function DonorList({ donors, initialGroup, onOpen, onAdd, onRecor
             >
               Clear filters
             </button>
-            <button
-              className="btn ghost small"
-              onClick={() => downloadCsv(`donors-${todayStr()}.csv`, CSV_COLUMNS, filtered)}
-              disabled={!filtered.length}
-            >
-              ⬇ Export {filtered.length} to Excel (CSV)
-            </button>
+            {canExport && (
+              <button
+                className="btn ghost small"
+                onClick={() => downloadCsv(`donors-${todayStr()}.csv`, CSV_COLUMNS, filtered)}
+                disabled={!filtered.length}
+              >
+                ⬇ Export {filtered.length} to Excel (CSV)
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -169,7 +173,7 @@ export default function DonorList({ donors, initialGroup, onOpen, onAdd, onRecor
       ) : (
         <div className="list">
           {filtered.slice(0, limit).map((d) => (
-            <DonorCard key={d.id} donor={d} onOpen={onOpen} onRecord={onRecord} />
+            <DonorCard key={d.id} donor={d} onOpen={onOpen} onRecord={onRecord || undefined} />
           ))}
           {filtered.length > limit && (
             <button className="btn ghost block" onClick={() => setLimit((l) => l + PAGE)}>
