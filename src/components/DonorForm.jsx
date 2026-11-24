@@ -66,7 +66,7 @@ export default function DonorForm({ donor, onClose, onSaved }) {
           <button className="btn ghost" onClick={onClose} disabled={busy}>
             Cancel
           </button>
-          <button className="btn primary" type="submit" form="donor-form" disabled={busy}>
+          <button className="btn primary grow" type="submit" form="donor-form" disabled={busy}>
             {busy ? <Spinner small /> : isEdit ? 'Save changes' : 'Add donor'}
           </button>
         </>
@@ -92,7 +92,7 @@ export default function DonorForm({ donor, onClose, onSaved }) {
           <Field label="Alternate phone">
             <input type="tel" value={v.altPhone} onChange={set('altPhone')} inputMode="tel" maxLength={20} />
           </Field>
-          <Field label="Gender" hint="Decides the waiting period (men 3 months, women 4 months).">
+          <Field label="Gender" hint="Decides the waiting period between donations (see Settings).">
             <select value={v.gender} onChange={set('gender')}>
               <option value="">Not specified</option>
               {GENDERS.map((g) => (

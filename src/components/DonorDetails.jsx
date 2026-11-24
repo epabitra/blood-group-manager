@@ -1,12 +1,11 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { ageFrom, formatDate, timeAgo, todayStr } from '../utils';
+import { ageFrom, formatDate, gapDays, timeAgo } from '../utils';
 import { BloodBadge, ContactButtons, Modal, Spinner, StatusPill } from './ui';
 
-export default function DonorDetails({ donor, isAdmin, onClose, onEdit, onUpdated, onDeleted }) {
+export default function DonorDetails({ donor, settings, isAdmin, onClose, onEdit, onRecord, onDeleted }) {
   const [history, setHistory] = useState(null);
   const [historyError, setHistoryError] = useState('');
-  const [showRecord, setShowRecord] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -14,6 +13,7 @@ export default function DonorDetails({ donor, isAdmin, onClose, onEdit, onUpdate
   useEffect(() => {
     let active = true;
     setHistory(null);
+    setHistoryError('');
     api
       .listDonations(donor.id)
       .then((h) => active && setHistory(h))
@@ -36,6 +36,7 @@ export default function DonorDetails({ donor, isAdmin, onClose, onEdit, onUpdate
   };
 
   const age = ageFrom(donor.dateOfBirth);
+  const place = [donor.area, donor.city, donor.pincode].filter(Boolean).join(', ');
   const rows = [
     ['Phone', donor.phone],
     ['Alternate phone', donor.altPhone],
@@ -44,11 +45,10 @@ export default function DonorDetails({ donor, isAdmin, onClose, onEdit, onUpdate
     ['Weight', donor.weightKg ? `${donor.weightKg} kg` : ''],
     ['Email', donor.email],
     ['Address', donor.address],
-    ['Area', donor.area],
-    ['City', donor.city],
-    ['Pincode', donor.pincode],
+    ['Area', place],
     ['Last donated', donor.lastDonated ? `${formatDate(donor.lastDonated)} (${timeAgo(donor.lastDonated)})` : 'Never / unknown'],
     ['Total donations', donor.totalDonations || 0],
+    ['Waiting period', `${gapDays(donor.gender, settings)} days`],
     ['Availability', donor.availability],
     ['Registered at', donor.source],
     ['Medical notes', donor.medicalNotes],
@@ -63,52 +63,24 @@ export default function DonorDetails({ donor, isAdmin, onClose, onEdit, onUpdate
       wide
       footer={
         <>
-          {error && <p className="error grow">{error}</p>}
-          {isAdmin &&
-            (confirmDelete ? (
-              <div className="warning grow">
-                Delete {donor.name} permanently?
-                <button className="btn small danger" onClick={remove} disabled={busy}>
-                  {busy ? <Spinner small /> : 'Yes, delete'}
-                </button>
-                <button className="btn small ghost" onClick={() => setConfirmDelete(false)} disabled={busy}>
-                  No
-                </button>
-              </div>
-            ) : (
-              <button className="btn ghost danger-text" onClick={() => setConfirmDelete(true)}>
-                Delete
-              </button>
-            ))}
-          <span className="grow" />
           <button className="btn ghost" onClick={onEdit}>
             ✎ Edit
           </button>
-          <button className="btn primary" onClick={() => setShowRecord((s) => !s)}>
-            + Record donation
+          <button className="btn primary grow" onClick={onRecord}>
+            ＋ Record donation
           </button>
         </>
       }
     >
       <div className="details-head">
         <BloodBadge group={donor.bloodGroup} large />
-        <div>
+        <div className="grow">
           <h3>{donor.name}</h3>
           <StatusPill elig={donor._elig} />
           {donor._elig.nextDate && <p className="muted small">Can donate from {formatDate(donor._elig.nextDate)}</p>}
         </div>
-        <ContactButtons phone={donor.phone} />
       </div>
-
-      {showRecord && (
-        <RecordDonation
-          donor={donor}
-          onDone={(d) => {
-            setShowRecord(false);
-            onUpdated(d);
-          }}
-        />
-      )}
+      <ContactButtons phone={donor.phone} />
 
       <dl className="details">
         {rows.map(([k, val]) => (
@@ -138,50 +110,27 @@ export default function DonorDetails({ donor, isAdmin, onClose, onEdit, onUpdate
           ))}
         </ul>
       )}
+
+      {isAdmin && (
+        <div className="danger-zone">
+          {error && <p className="error">{error}</p>}
+          {confirmDelete ? (
+            <div className="warning">
+              Delete {donor.name} permanently?
+              <button className="btn small danger" onClick={remove} disabled={busy}>
+                {busy ? <Spinner small /> : 'Yes, delete'}
+              </button>
+              <button className="btn small ghost" onClick={() => setConfirmDelete(false)} disabled={busy}>
+                No
+              </button>
+            </div>
+          ) : (
+            <button className="btn ghost small danger-text" onClick={() => setConfirmDelete(true)}>
+              Delete this donor
+            </button>
+          )}
+        </div>
+      )}
     </Modal>
-  );
-}
-
-function RecordDonation({ donor, onDone }) {
-  const [date, setDate] = useState(todayStr());
-  const [place, setPlace] = useState('');
-  const [notes, setNotes] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-
-  const submit = async (e) => {
-    e.preventDefault();
-    setBusy(true);
-    setError('');
-    try {
-      onDone(await api.recordDonation(donor.id, date, place, notes));
-    } catch (err) {
-      setError(err.message);
-      setBusy(false);
-    }
-  };
-
-  return (
-    <form className="record-box" onSubmit={submit}>
-      <h4>Record a donation by {donor.name}</h4>
-      <div className="row wrap">
-        <label className="field">
-          <span>Date *</span>
-          <input type="date" value={date} max={todayStr()} onChange={(e) => setDate(e.target.value)} required />
-        </label>
-        <label className="field grow">
-          <span>Camp / hospital</span>
-          <input value={place} onChange={(e) => setPlace(e.target.value)} maxLength={200} />
-        </label>
-        <label className="field grow">
-          <span>Notes</span>
-          <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. for patient at XYZ" maxLength={500} />
-        </label>
-      </div>
-      {error && <p className="error">{error}</p>}
-      <button className="btn primary small" disabled={busy}>
-        {busy ? <Spinner small /> : 'Save donation'}
-      </button>
-    </form>
   );
 }

@@ -17,12 +17,9 @@ export const COMPATIBLE_DONORS = {
   'Bombay (Oh)': ['Bombay (Oh)'],
 };
 
-// Minimum gap between whole-blood donations (India NBTC guideline).
-export const DONATION_GAP_DAYS = { Male: 90, Female: 120 };
-export const DEFAULT_GAP_DAYS = 90;
-export const MIN_AGE = 18;
-export const MAX_AGE = 65;
-export const MIN_WEIGHT_KG = 45;
+// Eligibility rules. Defaults follow India NBTC guidelines; admins can change them
+// on the Settings page (stored on the server so every device uses the same rules).
+export const DEFAULT_SETTINGS = { gapMale: 90, gapFemale: 120, gapOther: 90, minAge: 18, maxAge: 65, minWeight: 45 };
 
 export const EMPTY_DONOR = {
   id: '',

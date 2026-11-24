@@ -45,7 +45,7 @@ computer (they are not committed to this repository). Ask the maintainer for the
 
 1. The login sends the username and password to the Apps Script backend.
 2. Passwords are stored only as salted, repeatedly-hashed values (SHA-256) in the **Users** sheet.
-3. After a successful login the backend returns a random session token. It is valid for 6 hours and stored in Google's cache.
+3. After a successful login the backend returns a random session token, valid for 7 days. Only a hash of the token is stored on the server.
 4. Every other request must include that token. Without it, the backend returns no data.
 5. After 5 wrong passwords, that username is locked for 15 minutes.
 6. Disabling a user or resetting their password logs them out on all devices.
@@ -59,7 +59,7 @@ src/api.js                   API client and session handling
 src/constants.js             Blood groups, compatibility table, eligibility rules
 src/utils.js                 Dates, eligibility, phone links, CSV export
 src/App.jsx                  Login gate, navigation, data store
-src/components/              Screens: Login, Dashboard, FindDonors, DonorList, DonorForm, DonorDetails, Account
+src/components/              Screens: Login, Home, FindDonors, DonorList, DonorForm, DonorDetails, RecordDonation, Settings
 .github/workflows/deploy.yml Builds and publishes to GitHub Pages on every push to main
 ```
 

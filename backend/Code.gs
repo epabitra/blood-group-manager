@@ -9,7 +9,8 @@
  */
 
 const CONFIG = {
-  SESSION_HOURS: 6,          // Max 6 (Apps Script cache limit).
+  SESSION_DAYS: 7,           // How long a login stays valid on a device.
+  DONOR_CACHE_SECONDS: 600,  // Server-side cache of the donor list (cleared on every change).
   MAX_LOGIN_ATTEMPTS: 5,     // Failed attempts before a username is locked.
   LOCKOUT_MINUTES: 15,
   HASH_ROUNDS: 500,          // Password hashing rounds. Don't change after users exist.
@@ -73,6 +74,13 @@ const USER_COLUMNS = [
   ['lastLogin', 'Last Login'],
 ];
 
+// Eligibility rules, editable by admins from the app's Settings page.
+const DEFAULT_SETTINGS = { gapMale: 90, gapFemale: 120, gapOther: 90, minAge: 18, maxAge: 65, minWeight: 45 };
+const SETTINGS_LIMITS = {
+  gapMale: [30, 730], gapFemale: [30, 730], gapOther: [30, 730],
+  minAge: [16, 30], maxAge: [50, 80], minWeight: [30, 80],
+};
+
 const DONOR_KEYS = DONOR_COLUMNS.map(c => c[0]);
 const DATE_FIELDS = { dateOfBirth: true, lastDonated: true, date: true };
 const EDITABLE_DONOR_FIELDS = [
@@ -109,6 +117,8 @@ function doPost(e) {
 const ACTIONS = {
   logout: logout_,
   me: me_,
+  bootstrap: bootstrap_,
+  saveSettings: saveSettings_,
   listDonors: listDonors_,
   saveDonor: saveDonor_,
   deleteDonor: deleteDonor_,
@@ -116,7 +126,7 @@ const ACTIONS = {
   listDonations: listDonations_,
   changePassword: changePassword_,
 };
-const ADMIN_ONLY = { deleteDonor: true };
+const ADMIN_ONLY = { deleteDonor: true, saveSettings: true };
 
 function route_(req) {
   const action = String(req.action || '');
@@ -164,12 +174,54 @@ function login_(p) {
   }
   cache.remove(failKey);
   found.sheet.getRange(found.row, found.idx.lastLogin + 1).setValue(nowIso_());
-  return createSession_(found.user);
+  cleanupSessions_();
+
+  // Send the data with the login response so the app needs no second request.
+  const result = createSession_(found.user);
+  try {
+    result.bootstrap = bootstrap_({});
+  } catch (e) {
+    result.bootstrap = null;
+  }
+  return result;
 }
 
 function logout_(p, session, token) {
-  CacheService.getScriptCache().remove('sess_' + token);
+  const key = sessionKey_(token);
+  CacheService.getScriptCache().remove(key);
+  PropertiesService.getScriptProperties().deleteProperty(key);
   return true;
+}
+
+/** Everything the app needs on start-up, in one request. */
+function bootstrap_(p) {
+  return { settings: getSettings_(), donors: listDonors_(p) };
+}
+
+function getSettings_() {
+  const raw = PropertiesService.getScriptProperties().getProperty('settings');
+  const saved = raw ? JSON.parse(raw) : {};
+  const out = {};
+  Object.keys(DEFAULT_SETTINGS).forEach(k => {
+    out[k] = typeof saved[k] === 'number' ? saved[k] : DEFAULT_SETTINGS[k];
+  });
+  return out;
+}
+
+function saveSettings_(p) {
+  const s = p.settings || {};
+  const out = {};
+  Object.keys(DEFAULT_SETTINGS).forEach(k => {
+    const v = parseInt(s[k], 10);
+    const lim = SETTINGS_LIMITS[k];
+    if (!(v >= lim[0] && v <= lim[1])) {
+      throw apiError_('Value for "' + k + '" must be between ' + lim[0] + ' and ' + lim[1] + '.', 'BAD_REQUEST');
+    }
+    out[k] = v;
+  });
+  if (out.minAge >= out.maxAge) throw apiError_('Minimum age must be less than maximum age.', 'BAD_REQUEST');
+  PropertiesService.getScriptProperties().setProperty('settings', JSON.stringify(out));
+  return out;
 }
 
 function me_(p, session) {
@@ -189,19 +241,27 @@ function changePassword_(p, session) {
   return createSession_(found.user);
 }
 
+/**
+ * Sessions are stored in Script Properties (durable, survives 7 days) with a copy in the
+ * cache for speed. Only a hash of the token is stored, so a stored key can't be used to log in.
+ */
 function createSession_(user) {
   const token = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');
-  const ttl = CONFIG.SESSION_HOURS * 3600;
+  const expires = Date.now() + CONFIG.SESSION_DAYS * 86400000;
   const session = {
     username: user.username,
     name: user.displayName || user.username,
     role: user.role === 'admin' ? 'admin' : 'volunteer',
     created: Date.now(),
+    expires: expires,
   };
-  CacheService.getScriptCache().put('sess_' + token, JSON.stringify(session), ttl);
+  const key = sessionKey_(token);
+  const json = JSON.stringify(session);
+  PropertiesService.getScriptProperties().setProperty(key, json);
+  CacheService.getScriptCache().put(key, json, 21600);
   return {
     token: token,
-    expiresAt: Date.now() + ttl * 1000,
+    expiresAt: expires,
     user: { username: session.username, name: session.name, role: session.role },
   };
 }
@@ -210,21 +270,56 @@ function requireSession_(token) {
   if (!token || typeof token !== 'string' || token.length > 100) {
     throw apiError_('Please log in.', 'AUTH');
   }
+  const key = sessionKey_(token);
   const cache = CacheService.getScriptCache();
-  const raw = cache.get('sess_' + token);
+  const props = PropertiesService.getScriptProperties();
+  let raw = cache.get(key);
+  if (!raw) {
+    raw = props.getProperty(key);
+    if (raw) cache.put(key, raw, 21600);
+  }
   if (!raw) throw apiError_('Your session has expired. Please log in again.', 'AUTH');
+
   const session = JSON.parse(raw);
-  const revokedAt = Number(PropertiesService.getScriptProperties().getProperty('revoked_' + session.username) || 0);
-  if (revokedAt && session.created <= revokedAt) {
-    cache.remove('sess_' + token);
-    throw apiError_('You have been logged out. Please log in again.', 'AUTH');
+  const revokedAt = Number(props.getProperty('revoked_' + session.username) || 0);
+  if (session.expires < Date.now() || (revokedAt && session.created <= revokedAt)) {
+    cache.remove(key);
+    props.deleteProperty(key);
+    throw apiError_('Your session has expired. Please log in again.', 'AUTH');
   }
   return session;
 }
 
+function sessionKey_(token) {
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(token), Utilities.Charset.UTF_8);
+  return 'sess_' + bytes.map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('');
+}
+
 /** Invalidates all existing sessions of a user (used on disable / password reset). */
 function revokeSessions_(username) {
-  PropertiesService.getScriptProperties().setProperty('revoked_' + username, String(Date.now()));
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty('revoked_' + username, String(Date.now()));
+  const all = props.getProperties();
+  Object.keys(all).forEach(k => {
+    if (k.indexOf('sess_') === 0) {
+      try {
+        if (JSON.parse(all[k]).username === username) props.deleteProperty(k);
+      } catch (e) { props.deleteProperty(k); }
+    }
+  });
+}
+
+/** Removes expired sessions so the property store stays small. */
+function cleanupSessions_() {
+  const props = PropertiesService.getScriptProperties();
+  const all = props.getProperties();
+  const now = Date.now();
+  Object.keys(all).forEach(k => {
+    if (k.indexOf('sess_') !== 0) return;
+    try {
+      if (JSON.parse(all[k]).expires < now) props.deleteProperty(k);
+    } catch (e) { props.deleteProperty(k); }
+  });
 }
 
 function hashPassword_(password, salt) {
@@ -283,8 +378,26 @@ function findUser_(username) {
 /* Donors                                                              */
 /* ------------------------------------------------------------------ */
 
-/** Returns all donors as { fields, rows } (arrays keep the response small). */
-function listDonors_() {
+/**
+ * Returns all donors as { fields, rows } (arrays keep the response small).
+ * Served from the cache unless p.fresh is set (the app's Refresh button).
+ */
+function listDonors_(p) {
+  const cache = CacheService.getScriptCache();
+  let gen = cache.get('donors_gen');
+  if (!gen) {
+    gen = newId_();
+    cache.put('donors_gen', gen, 21600);
+  } else if (!(p && p.fresh)) {
+    const cached = readDonorCache_(gen);
+    if (cached) return cached;
+  }
+  const data = readDonorsFromSheet_();
+  writeDonorCache_(gen, data);
+  return data;
+}
+
+function readDonorsFromSheet_() {
   const sheet = getSheet_(SHEETS.DONORS);
   const idx = headerIndex_(sheet, DONOR_COLUMNS).idx;
   const last = sheet.getLastRow();
@@ -309,6 +422,51 @@ function listDonors_() {
     });
   }
   return { fields: DONOR_KEYS, rows: rows };
+}
+
+// The cached list is split into chunks (each cache entry is limited to 100 KB).
+// "gen" changes on every write, so a list read before a write is never served after it.
+const DONOR_CHUNK_CHARS = 25000;
+
+function readDonorCache_(gen) {
+  const cache = CacheService.getScriptCache();
+  const meta = String(cache.get('donors_meta') || '').split(':');
+  if (meta[0] !== gen) return null;
+  const keys = [];
+  for (let i = 0; i < Number(meta[1]); i++) keys.push('donors_' + i);
+  const parts = cache.getAll(keys);
+  let json = '';
+  for (let i = 0; i < keys.length; i++) {
+    if (parts[keys[i]] === undefined || parts[keys[i]] === null) return null;
+    json += parts[keys[i]];
+  }
+  return JSON.parse(json);
+}
+
+function writeDonorCache_(gen, data) {
+  try {
+    const json = JSON.stringify(data);
+    const entries = {};
+    let n = 0;
+    for (let i = 0; i < json.length; i += DONOR_CHUNK_CHARS) {
+      entries['donors_' + n++] = json.slice(i, i + DONOR_CHUNK_CHARS);
+    }
+    entries.donors_meta = gen + ':' + n;
+    CacheService.getScriptCache().putAll(entries, CONFIG.DONOR_CACHE_SECONDS);
+  } catch (e) {
+    console.warn('Donor cache not written: ' + e);
+  }
+}
+
+function invalidateDonorCache_() {
+  CacheService.getScriptCache().put('donors_gen', newId_(), 21600);
+}
+
+/** Runs automatically when someone edits the sheet by hand, so the app shows the change. */
+function onEdit() {
+  try {
+    invalidateDonorCache_();
+  } catch (e) { /* not critical: the cache also expires on its own */ }
 }
 
 function saveDonor_(p, session) {
@@ -346,6 +504,7 @@ function saveDonor_(p, session) {
 
     if (rowNum) sheet.getRange(rowNum, 1, 1, h.width).setValues([row]);
     else sheet.appendRow(row);
+    invalidateDonorCache_();
 
     return rowToDonor_(row, idx);
   });
@@ -359,6 +518,7 @@ function deleteDonor_(p) {
     const rowNum = findRowById_(sheet, idx.id, id);
     if (!rowNum) throw apiError_('Donor not found.', 'NOT_FOUND');
     sheet.deleteRow(rowNum);
+    invalidateDonorCache_();
     return true;
   });
 }
@@ -402,6 +562,7 @@ function recordDonation_(p, session) {
     dRow[dh.idx.recordedBy] = session.username;
     dRow[dh.idx.recordedAt] = nowIso_();
     dSheet.appendRow(dRow);
+    invalidateDonorCache_();
 
     return rowToDonor_(row, idx);
   });

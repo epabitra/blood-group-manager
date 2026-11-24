@@ -1,48 +1,74 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api, getSession, setSessionLostHandler } from './api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { api, getCachedData, getSession, saveCachedData, setSessionLostHandler, toDonors } from './api';
+import { DEFAULT_SETTINGS } from './constants';
 import { eligibility, searchText } from './utils';
 import Login from './components/Login';
-import Dashboard from './components/Dashboard';
+import Home from './components/Home';
 import FindDonors from './components/FindDonors';
 import DonorList from './components/DonorList';
 import DonorForm from './components/DonorForm';
 import DonorDetails from './components/DonorDetails';
-import Account from './components/Account';
+import RecordDonation from './components/RecordDonation';
+import Settings from './components/Settings';
 import { Spinner } from './components/ui';
 
 export default function App() {
-  const [session, setSession] = useState(getSession);
+  const [auth, setAuth] = useState(() => ({ session: getSession(), bootstrap: null }));
 
   useEffect(() => {
-    setSessionLostHandler(() => setSession(null));
+    setSessionLostHandler(() => setAuth({ session: null, bootstrap: null }));
   }, []);
 
-  if (!session) return <Login onLogin={setSession} />;
-  return <Main session={session} setSession={setSession} />;
+  if (!auth.session) return <Login onLogin={(session, bootstrap) => setAuth({ session, bootstrap })} />;
+  return (
+    <Main
+      key={auth.session.user.username}
+      session={auth.session}
+      initialData={auth.bootstrap}
+      setSession={(session) => setAuth({ session, bootstrap: null })}
+    />
+  );
 }
 
-/** Adds fields computed once per donor so lists and filters stay fast. */
-function enrich(d) {
-  return { ...d, _search: searchText(d), _elig: eligibility(d) };
-}
-
-const VIEWS = ['home', 'find', 'donors', 'account'];
+const VIEWS = ['home', 'find', 'donors', 'settings'];
 
 function readHash() {
   const [view, param] = window.location.hash.replace(/^#\/?/, '').split('/');
   return { view: VIEWS.includes(view) ? view : 'home', param: param ? decodeURIComponent(param) : '' };
 }
 
-function Main({ session, setSession }) {
+function Main({ session, initialData, setSession }) {
+  const username = session.user.username;
+  const cached = useRef(initialData ? null : getCachedData(username)).current;
+
   const [route, setRoute] = useState(readHash);
-  const [donors, setDonors] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
+  const [settings, setSettings] = useState(
+    initialData?.settings || cached?.settings || DEFAULT_SETTINGS,
+  );
+  const [rawDonors, setRawDonors] = useState(() =>
+    initialData ? toDonors(initialData.donors) : cached?.donors || null,
+  );
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState('');
+  const [lastSync, setLastSync] = useState(initialData ? Date.now() : cached?.savedAt || null);
+
   const [editing, setEditing] = useState(null); // donor object for the form, or null
   const [viewingId, setViewingId] = useState(null);
+  const [recording, setRecording] = useState(null); // { donorId } or null
   const [toast, setToast] = useState('');
 
   const isAdmin = session.user.role === 'admin';
+
+  // Search text and eligibility are computed once per donor here, so screens stay fast.
+  const donors = useMemo(
+    () => (rawDonors || []).map((d) => ({ ...d, _search: searchText(d), _elig: eligibility(d, settings) })),
+    [rawDonors, settings],
+  );
+
+  // Keep the on-device copy in sync with every change.
+  useEffect(() => {
+    if (rawDonors) saveCachedData(username, settings, rawDonors);
+  }, [rawDonors, settings, username]);
 
   useEffect(() => {
     const onHash = () => setRoute(readHash());
@@ -55,41 +81,43 @@ function Main({ session, setSession }) {
     window.scrollTo(0, 0);
   };
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setLoadError('');
+  const sync = useCallback(async (fresh) => {
+    setSyncing(true);
+    setSyncError('');
     try {
-      const list = await api.listDonors();
-      setDonors(list.map(enrich));
+      const data = await api.bootstrap(fresh);
+      setSettings(data.settings);
+      setRawDonors(toDonors(data.donors));
+      setLastSync(Date.now());
     } catch (e) {
-      setLoadError(e.message);
+      setSyncError(e.message);
     } finally {
-      setLoading(false);
+      setSyncing(false);
     }
   }, []);
 
+  // Show the saved copy instantly, then fetch the latest data in the background.
   useEffect(() => {
-    load();
-  }, [load]);
+    if (!initialData) sync(false);
+  }, [initialData, sync]);
 
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(''), 3500);
+    const t = setTimeout(() => setToast(''), 3000);
     return () => clearTimeout(t);
   }, [toast]);
 
   // Update the local list after a save instead of reloading everything.
   const upsert = (donor) => {
-    const e = enrich(donor);
-    setDonors((list) => {
-      const i = list.findIndex((d) => d.id === e.id);
-      if (i === -1) return [e, ...list];
+    setRawDonors((list) => {
+      const i = list.findIndex((d) => d.id === donor.id);
+      if (i === -1) return [donor, ...list];
       const copy = list.slice();
-      copy[i] = e;
+      copy[i] = donor;
       return copy;
     });
   };
-  const remove = (id) => setDonors((list) => list.filter((d) => d.id !== id));
+  const remove = (id) => setRawDonors((list) => list.filter((d) => d.id !== id));
 
   const logout = async () => {
     try {
@@ -97,29 +125,36 @@ function Main({ session, setSession }) {
     } catch {
       /* session is cleared locally anyway */
     }
+    window.location.hash = '';
     setSession(null);
   };
 
+  const openRecord = (donorId) => setRecording({ donorId: donorId || null });
   const viewing = viewingId ? donors.find((d) => d.id === viewingId) : null;
 
   let content;
-  if (loading && donors.length === 0) {
-    content = (
+  if (!rawDonors) {
+    content = syncError ? (
       <div className="center-box">
-        <Spinner /> <p>Loading donors…</p>
-      </div>
-    );
-  } else if (loadError && donors.length === 0) {
-    content = (
-      <div className="center-box">
-        <p className="error">{loadError}</p>
-        <button className="btn primary" onClick={load}>
+        <p className="error">{syncError}</p>
+        <button className="btn primary" onClick={() => sync(true)}>
           Try again
         </button>
       </div>
+    ) : (
+      <div className="center-box">
+        <Spinner /> <p className="muted">Loading donors…</p>
+      </div>
     );
   } else if (route.view === 'find') {
-    content = <FindDonors donors={donors} group={route.param} onGroup={(g) => go('find', g)} onOpen={setViewingId} />;
+    content = (
+      <FindDonors
+        donors={donors}
+        group={route.param}
+        onGroup={(g) => window.location.replace(`#/find/${encodeURIComponent(g)}`)}
+        onOpen={setViewingId}
+      />
+    );
   } else if (route.view === 'donors') {
     content = (
       <DonorList
@@ -127,17 +162,36 @@ function Main({ session, setSession }) {
         initialGroup={route.param}
         onOpen={setViewingId}
         onAdd={() => setEditing({})}
+        onRecord={openRecord}
       />
     );
-  } else if (route.view === 'account') {
-    content = <Account session={session} setSession={setSession} onLogout={logout} onToast={setToast} />;
+  } else if (route.view === 'settings') {
+    content = (
+      <Settings
+        session={session}
+        isAdmin={isAdmin}
+        settings={settings}
+        onSettingsSaved={(s) => {
+          setSettings(s);
+          setToast('Settings saved');
+        }}
+        setSession={setSession}
+        onLogout={logout}
+        onToast={setToast}
+        lastSync={lastSync}
+        donorCount={donors.length}
+      />
+    );
   } else {
     content = (
-      <Dashboard
+      <Home
+        session={session}
         donors={donors}
         onFind={(g) => go('find', g)}
         onBrowse={(g) => go('donors', g)}
         onAdd={() => setEditing({})}
+        onRecord={() => openRecord()}
+        onOpen={setViewingId}
       />
     );
   }
@@ -145,30 +199,39 @@ function Main({ session, setSession }) {
   return (
     <div className="app">
       <header className="topbar">
-        <div className="topbar-inner">
-          <a className="brand" href="#/home">
-            <img src="./favicon.svg" alt="" width="26" height="26" />
-            <span>Blood Group Manager</span>
-          </a>
-          <nav className="nav">
-            {[
-              ['home', 'Home'],
-              ['find', 'Find Blood'],
-              ['donors', 'Donors'],
-              ['account', 'Account'],
-            ].map(([v, label]) => (
-              <a key={v} href={`#/${v}`} className={route.view === v ? 'active' : ''}>
-                {label}
-              </a>
-            ))}
-          </nav>
-          <button className="btn small ghost refresh" onClick={load} disabled={loading} title="Reload data from the sheet">
-            {loading ? <Spinner small /> : '↻'} <span className="hide-sm">Refresh</span>
-          </button>
-        </div>
+        <a className="brand" href="#/home">
+          <img src="./favicon.svg" alt="" width="24" height="24" />
+          <span>Blood Group Manager</span>
+        </a>
+        <button
+          className="sync-btn"
+          onClick={() => sync(true)}
+          disabled={syncing}
+          aria-label="Refresh data"
+          title={syncError || 'Refresh data'}
+        >
+          {syncing ? <Spinner small /> : syncError ? '⚠' : '↻'}
+        </button>
       </header>
 
+      {syncError && rawDonors && (
+        <div className="banner" onClick={() => sync(true)}>
+          Couldn't update: {syncError} <u>Tap to retry</u>
+        </div>
+      )}
+
       <main className="container">{content}</main>
+
+      <nav className="bottom-nav" aria-label="Main">
+        <NavItem href="#/home" active={route.view === 'home'} icon="⌂" label="Home" />
+        <NavItem href="#/find" active={route.view === 'find'} icon="🔍" label="Find Blood" />
+        <button className="nav-record" onClick={() => openRecord()} aria-label="Record donation">
+          <span className="plus">＋</span>
+          <span className="label">Donation</span>
+        </button>
+        <NavItem href="#/donors" active={route.view === 'donors'} icon="👥" label="Donors" />
+        <NavItem href="#/settings" active={route.view === 'settings'} icon="⚙" label="Settings" />
+      </nav>
 
       {editing && (
         <DonorForm
@@ -181,16 +244,14 @@ function Main({ session, setSession }) {
           }}
         />
       )}
-      {viewing && !editing && (
+      {viewing && !editing && !recording && (
         <DonorDetails
           donor={viewing}
+          settings={settings}
           isAdmin={isAdmin}
           onClose={() => setViewingId(null)}
           onEdit={() => setEditing(viewing)}
-          onUpdated={(d) => {
-            upsert(d);
-            setToast('Donation recorded');
-          }}
+          onRecord={() => openRecord(viewing.id)}
           onDeleted={() => {
             remove(viewing.id);
             setViewingId(null);
@@ -198,7 +259,34 @@ function Main({ session, setSession }) {
           }}
         />
       )}
+      {recording && (
+        <RecordDonation
+          donors={donors}
+          initialDonorId={recording.donorId}
+          onClose={() => setRecording(null)}
+          onAddDonor={() => {
+            setRecording(null);
+            setEditing({});
+          }}
+          onSaved={(d) => {
+            upsert(d);
+            setRecording(null);
+            setToast(`Donation recorded for ${d.name}`);
+          }}
+        />
+      )}
       {toast && <div className="toast">{toast}</div>}
     </div>
+  );
+}
+
+function NavItem({ href, active, icon, label }) {
+  return (
+    <a href={href} className={active ? 'active' : ''} aria-current={active ? 'page' : undefined}>
+      <span className="icon" aria-hidden="true">
+        {icon}
+      </span>
+      <span className="label">{label}</span>
+    </a>
   );
 }

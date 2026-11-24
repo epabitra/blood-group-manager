@@ -1,0 +1,21 @@
+{
+  "id": "./",
+  "name": "Blood Group Manager",
+  "short_name": "Blood Manager",
+  "description": "Find blood donors fast and keep donor records.",
+  "start_url": "./#/home",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f4f5f7",
+  "theme_color": "#c62828",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Find Blood", "short_name": "Find Blood", "url": "./#/find", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] },
+    { "name": "Donors", "short_name": "Donors", "url": "./#/donors", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] }
+  ]
+}

@@ -14,7 +14,8 @@ export default function Login({ onLogin }) {
     setBusy(true);
     setError('');
     try {
-      onLogin(await api.login(username, password));
+      const { session, bootstrap } = await api.login(username, password);
+      onLogin(session, bootstrap);
     } catch (err) {
       setError(err.message);
       setPassword('');
@@ -33,6 +34,10 @@ export default function Login({ onLogin }) {
         <label>
           Username
           <input
+            type="text"
+            inputMode="email"
+            autoCorrect="off"
+            spellCheck={false}
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             autoComplete="username"

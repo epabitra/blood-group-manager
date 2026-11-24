@@ -1,4 +1,4 @@
-import { DEFAULT_GAP_DAYS, DONATION_GAP_DAYS, MAX_AGE, MIN_AGE, MIN_WEIGHT_KG } from './constants';
+import { DEFAULT_SETTINGS } from './constants';
 
 const DAY = 86400000;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -46,20 +46,28 @@ export function timeAgo(s) {
  * Works out whether a donor can be asked to donate today.
  * status: eligible | waiting | ineligible | unavailable | dnc
  */
-export function eligibility(donor, today = new Date()) {
+export function gapDays(gender, settings = DEFAULT_SETTINGS) {
+  if (gender === 'Male') return settings.gapMale;
+  if (gender === 'Female') return settings.gapFemale;
+  return settings.gapOther;
+}
+
+export function eligibility(donor, settings = DEFAULT_SETTINGS, today = new Date()) {
   if (donor.availability === 'Do Not Contact') return { status: 'dnc', label: 'Do not contact' };
   if (donor.availability === 'Unavailable') return { status: 'unavailable', label: 'Unavailable' };
 
   const age = ageFrom(donor.dateOfBirth, today);
-  if (age !== null && (age < MIN_AGE || age > MAX_AGE)) {
-    return { status: 'ineligible', label: `Age ${age} (allowed ${MIN_AGE}–${MAX_AGE})` };
+  if (age !== null && (age < settings.minAge || age > settings.maxAge)) {
+    return { status: 'ineligible', label: `Age ${age} (allowed ${settings.minAge}–${settings.maxAge})` };
   }
   const weight = Number(donor.weightKg);
-  if (weight && weight < MIN_WEIGHT_KG) return { status: 'ineligible', label: `Weight below ${MIN_WEIGHT_KG} kg` };
+  if (weight && weight < settings.minWeight) {
+    return { status: 'ineligible', label: `Weight below ${settings.minWeight} kg` };
+  }
 
   const last = parseDate(donor.lastDonated);
   if (last) {
-    const gap = DONATION_GAP_DAYS[donor.gender] || DEFAULT_GAP_DAYS;
+    const gap = gapDays(donor.gender, settings);
     const next = new Date(last.getTime() + gap * DAY);
     if (next > today) {
       const days = Math.ceil((next - today) / DAY);
@@ -89,9 +97,18 @@ export function whatsappLink(phone, text = '') {
 
 /** Lower-cased text used for the instant search box. */
 export function searchText(d) {
-  return [d.name, d.phone, d.altPhone, d.area, d.city, d.pincode, d.address, d.source, d.bloodGroup]
+  // Digits-only phones let "98765 43210" and "9876543210" both match.
+  return [d.name, d.phone, digits(d.phone), d.altPhone, digits(d.altPhone), d.area, d.city, d.pincode, d.address, d.source, d.bloodGroup]
     .join(' ')
     .toLowerCase();
+}
+
+/** Every word of the query must appear (name, phone, area…). Digit queries ignore spaces/dashes. */
+export function matchesQuery(donor, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return true;
+  if (/^[\d\s+()-]+$/.test(q)) return donor._search.includes(digits(q));
+  return q.split(/\s+/).every((w) => donor._search.includes(w));
 }
 
 function csvCell(v) {
