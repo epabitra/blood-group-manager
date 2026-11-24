@@ -3,7 +3,6 @@ import { api } from '../api';
 import { DEFAULT_SETTINGS } from '../constants';
 import { Spinner } from './ui';
 import InstallCard from './InstallCard';
-import ImportDonors from './ImportDonors';
 
 const RULES = [
   { key: 'gapMale', label: 'Waiting period – men', unit: 'days', min: 30, max: 730 },
@@ -25,7 +24,6 @@ export default function Settings({
   onToast,
   lastSync,
   donorCount,
-  onImported,
 }) {
   const { user } = session;
 
@@ -43,7 +41,7 @@ export default function Settings({
         </button>
       </section>
 
-      {(perms.manageVolunteers || isAdmin) && (
+      {(perms.manageVolunteers || isAdmin || perms.importDonors) && (
         <section className="card menu-list">
           {perms.manageVolunteers && (
             <a href="#/users" className="menu-item">
@@ -67,6 +65,16 @@ export default function Settings({
               <span className="chev">›</span>
             </a>
           )}
+          {perms.importDonors && (
+            <a href="#/import" className="menu-item">
+              <span className="menu-icon">📥</span>
+              <span className="grow">
+                <strong>Import donors</strong>
+                <small className="muted">Add many donors at once from a file</small>
+              </span>
+              <span className="chev">›</span>
+            </a>
+          )}
         </section>
       )}
 
@@ -79,8 +87,6 @@ export default function Settings({
         settings={settings}
         onSaved={onSettingsSaved}
       />
-
-      {perms.importDonors && <ImportDonors onImported={onImported} onToast={onToast} />}
 
       <ChangePassword setSession={setSession} onToast={onToast} />
 

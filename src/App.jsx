@@ -12,6 +12,7 @@ import RecordDonation from './components/RecordDonation';
 import Settings from './components/Settings';
 import Users from './components/Users';
 import Permissions from './components/Permissions';
+import ImportDonors from './components/ImportDonors';
 import { Spinner } from './components/ui';
 
 export default function App() {
@@ -32,7 +33,7 @@ export default function App() {
   );
 }
 
-const VIEWS = ['home', 'find', 'donors', 'settings', 'users', 'permissions'];
+const VIEWS = ['home', 'find', 'donors', 'settings', 'users', 'permissions', 'import'];
 
 function readHash() {
   const [view, param] = window.location.hash.replace(/^#\/?/, '').split('/');
@@ -170,6 +171,7 @@ function Main({ session, initialData, setSession }) {
     donors: canView,
     users: Boolean(p.manageVolunteers),
     permissions: isAdmin,
+    import: Boolean(p.importDonors),
   };
   const view = allowed[route.view] ? route.view : 'home';
 
@@ -207,6 +209,18 @@ function Main({ session, initialData, setSession }) {
         canExport={Boolean(p.exportDonors)}
       />
     );
+  } else if (view === 'import') {
+    content = (
+      <div className="stack narrow">
+        <div>
+          <a href="#/settings" className="back-link">
+            ← Settings
+          </a>
+          <h2 className="m0">Import donors</h2>
+        </div>
+        <ImportDonors onImported={() => sync(true)} onToast={setToast} />
+      </div>
+    );
   } else if (view === 'users') {
     content = <Users session={session} onToast={setToast} />;
   } else if (view === 'permissions') {
@@ -236,7 +250,6 @@ function Main({ session, initialData, setSession }) {
         onToast={setToast}
         lastSync={lastSync}
         donorCount={canView ? donors.length : null}
-        onImported={() => sync(true)}
       />
     );
   } else {
@@ -268,7 +281,7 @@ function Main({ session, initialData, setSession }) {
     <NavItem
       key="settings"
       href="#/settings"
-      active={['settings', 'users', 'permissions'].includes(view)}
+      active={['settings', 'users', 'permissions', 'import'].includes(view)}
       icon="⚙"
       label="Settings"
     />,
